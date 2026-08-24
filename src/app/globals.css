@@ -1,0 +1,44 @@
+@import url("https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Arabic:wght@400;500;600;700&display=swap");
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "IBM Plex Sans Arabic", ui-sans-serif, system-ui, sans-serif;
+  --color-primary: #1b6b4a;
+  --color-primary-foreground: #f7f3ea;
+  --color-secondary: #2f3d34;
+  --color-accent: #c9a227;
+  --color-accent-foreground: #1c1917;
+  --color-background: #f7f3ea;
+  --color-foreground: #1c1917;
+  --color-muted: #ebe4d6;
+  --color-muted-foreground: #5c564c;
+  --color-border: #d9d0bf;
+  --color-success: #1b7f4e;
+  --color-warning: #c9891a;
+  --color-danger: #b42318;
+  --color-info: #1d6b8a;
+  --color-card: #fffdf8;
+  --color-sidebar: #143d2d;
+  --color-sidebar-foreground: #f7f3ea;
+}
+
+html,
+body {
+  min-height: 100%;
+}
+
+body {
+  background: var(--color-background);
+  color: var(--color-foreground);
+  font-family: var(--font-sans);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
