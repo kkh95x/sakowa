@@ -1,0 +1,36 @@
+services:
+  app:
+    image: ${BOTHUB_IMAGE:-ghcr.io/kkh95x/bothub:latest}
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "${PORT:-3000}:3000"
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: production
+      MONGODB_URI: mongodb://mongo:27017
+      MONGODB_DB_NAME: ${MONGODB_DB_NAME:-bothub}
+      NEXT_PUBLIC_APP_URL: ${NEXT_PUBLIC_APP_URL:-http://localhost:3000}
+    depends_on:
+      mongo:
+        condition: service_started
+    networks:
+      - bothub-internal
+
+  mongo:
+    image: mongo:7
+    restart: unless-stopped
+    volumes:
+      - bothub-mongo:/data/db
+    networks:
+      - bothub-internal
+
+networks:
+  bothub-internal:
+    driver: bridge
+
+volumes:
+  bothub-mongo:
