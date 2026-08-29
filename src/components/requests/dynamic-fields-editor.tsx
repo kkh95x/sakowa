@@ -8,6 +8,7 @@ import { Dialog } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import type { FieldType, RequestField } from "@/types";
+import { nextFieldName } from "@/lib/requests/field-names";
 import { cn } from "@/lib/utils";
 
 export const FIELD_TYPES: FieldType[] = [
@@ -29,10 +30,11 @@ export const FIELD_TYPES: FieldType[] = [
   "CONFIRMATION",
 ];
 
-export function createEmptyField(order: number): RequestField {
+export function createEmptyField(fields: RequestField[]): RequestField {
+  const order = fields.length;
   return {
     id: crypto.randomUUID(),
-    name: `field_${order + 1}`,
+    name: nextFieldName(fields),
     label: `حقل ${order + 1}`,
     type: "TEXT",
     required: true,
@@ -244,7 +246,7 @@ export function DynamicFieldsEditor({
   }
 
   function addField() {
-    const field = createEmptyField(fields.length);
+    const field = createEmptyField(fields);
     onChange([...fields, field]);
     setEditingId(field.id);
   }
@@ -270,7 +272,10 @@ export function DynamicFieldsEditor({
       fd.append("file", file);
       fd.append("ownerId", fieldId);
       const res = await fetch("/api/uploads", { method: "POST", body: fd });
-      if (!res.ok) return;
+      if (!res.ok) {
+        clearLocalPreview(fieldId);
+        return;
+      }
       const data = await res.json();
       const fileId = String(data.fileId);
       const isImage = String(data.mimeType ?? "").startsWith("image/");

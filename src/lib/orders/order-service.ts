@@ -8,6 +8,7 @@ import { decrypt } from "@/lib/security/crypto";
 import { GridFSStorageService } from "@/lib/storage/gridfs";
 import { logJson } from "@/lib/log";
 import { persistOrderFieldFiles } from "@/lib/orders/persist-order-files";
+import { ensureUniqueFieldNames } from "@/lib/requests/field-names";
 import type { OrderFilter, OrderStatus, RequestField } from "@/types";
 
 function tryDecryptStored(value: string): string {
@@ -43,6 +44,29 @@ export class OrderService {
     );
     const seq = Number(result?.seq ?? 1);
     return `ORD-${String(seq).padStart(5, "0")}`;
+  }
+
+  /**
+   * Realigns the counter with the highest order number already stored. Needed when
+   * the counter and the orders collection drift apart (restored dump, reset counter),
+   * which otherwise collides with the unique orderNumber index forever.
+   */
+  private static async resyncNumberCounter() {
+    const db = await getDb();
+    const [latest] = await db
+      .collection(collections.orders)
+      .find({}, { projection: { orderNumber: 1 } })
+      .sort({ orderNumber: -1 })
+      .limit(1)
+      .toArray();
+
+    const highest = Number(String(latest?.orderNumber ?? "").replace(/\D/g, "")) || 0;
+    await db.collection(collections.orderCounters).updateOne(
+      { key: "global" },
+      { $max: { seq: highest } },
+      { upsert: true },
+    );
+    logJson("warn", "orders", "ORDER_NUMBER_COUNTER_RESYNCED", { highest });
   }
 
   static async countsByStatus(requestTypeId: string) {
@@ -134,14 +158,14 @@ export class OrderService {
     attachments?: string[];
   }) {
     const db = await getDb();
-    const orderNumber = await this.nextNumber();
+    const initialOrderNumber = await this.nextNumber();
     const now = new Date();
     const orderId = new ObjectId();
 
     const request = await db.collection(collections.requestTypes).findOne({
       _id: new ObjectId(params.requestTypeId),
     });
-    const fieldDefs = (request?.fields as RequestField[]) ?? [];
+    const fieldDefs = ensureUniqueFieldNames((request?.fields as RequestField[]) ?? []);
     const persisted = await persistOrderFieldFiles({
       botId: params.botId,
       orderId: String(orderId),
@@ -151,24 +175,40 @@ export class OrderService {
     });
     const attachmentIds = [...new Set([...(params.attachments ?? []), ...persisted.attachments])];
 
-    const result = await db.collection(collections.orders).insertOne({
-      _id: orderId,
-      orderNumber,
-      botId: params.botId,
-      requestTypeId: params.requestTypeId,
-      telegramUserId: params.telegramUserId,
-      chatId: params.chatId,
-      telegramUsername: params.telegramUsername ?? null,
-      telegramName: params.telegramName ?? null,
-      status: "PENDING",
-      fields: persisted.fields,
-      attachments: attachmentIds,
-      createdAt: now,
-      updatedAt: now,
-      submittedAt: now,
-      archivedAt: null,
-      lastUpdatedBy: null,
-    });
+    let orderNumber = initialOrderNumber;
+    let result: { insertedId: ObjectId } | null = null;
+    for (let attempt = 1; attempt <= 5 && !result; attempt += 1) {
+      try {
+        result = await db.collection(collections.orders).insertOne({
+          _id: orderId,
+          orderNumber,
+          botId: params.botId,
+          requestTypeId: params.requestTypeId,
+          telegramUserId: params.telegramUserId,
+          chatId: params.chatId,
+          telegramUsername: params.telegramUsername ?? null,
+          telegramName: params.telegramName ?? null,
+          status: "PENDING",
+          fields: persisted.fields,
+          attachments: attachmentIds,
+          createdAt: now,
+          updatedAt: now,
+          submittedAt: now,
+          archivedAt: null,
+          lastUpdatedBy: null,
+        });
+      } catch (err) {
+        const duplicateOrderNumber =
+          (err as { code?: number }).code === 11000 &&
+          /orderNumber/.test(String((err as { message?: string }).message ?? ""));
+        if (!duplicateOrderNumber || attempt === 5) throw err;
+
+        logJson("warn", "orders", "ORDER_NUMBER_CONFLICT", { orderNumber, attempt });
+        await this.resyncNumberCounter();
+        orderNumber = await this.nextNumber();
+      }
+    }
+    if (!result) throw new Error("ORDER_NUMBER_UNAVAILABLE");
     await db.collection(collections.orderStatusHistory).insertOne({
       orderId: String(result.insertedId),
       previousStatus: null,

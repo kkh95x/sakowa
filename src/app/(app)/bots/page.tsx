@@ -61,8 +61,10 @@ export default function BotsPage() {
       body: JSON.stringify({ name, token }),
     });
     setCreating(false);
+    const data = await res.json().catch(() => ({}));
     if (!res.ok) {
-      toast(ar.botCreateFailed);
+      const msg = typeof data.error === "string" ? data.error : ar.botCreateFailed;
+      toast(msg.startsWith("TELEGRAM_UNREACHABLE") ? ar.telegramUnreachable : msg);
       return;
     }
     setName("");

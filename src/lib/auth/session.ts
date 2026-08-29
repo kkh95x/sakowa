@@ -84,6 +84,7 @@ export async function requireUser() {
 
 export async function requireRole(roles: SessionUser["role"][]) {
   const user = await requireUser();
+  if (user.role === "SUPER_ADMIN" && roles.includes("ADMIN")) return user;
   if (!roles.includes(user.role)) {
     throw new Error("FORBIDDEN");
   }

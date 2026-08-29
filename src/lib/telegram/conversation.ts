@@ -6,6 +6,7 @@ import { TelegramService } from "@/lib/telegram/telegram-service";
 import { GridFSStorageService } from "@/lib/storage/gridfs";
 import { persistTelegramUpload } from "@/lib/orders/persist-order-files";
 import { persistValue, validateFieldValue } from "@/lib/telegram/validate-field";
+import { ensureUniqueFieldNames } from "@/lib/requests/field-names";
 import { logJson } from "@/lib/log";
 import { correlationId } from "@/lib/security/crypto";
 import type { ConversationState, RequestField } from "@/types";
@@ -42,7 +43,23 @@ function kb(rows: { text: string; callback_data: string }[][]) {
 }
 
 function activeFields(fields: RequestField[]) {
-  return [...fields].filter((f) => f.active !== false).sort((a, b) => a.order - b.order);
+  return ensureUniqueFieldNames(
+    [...fields].filter((f) => f.active !== false).sort((a, b) => a.order - b.order),
+  );
+}
+
+function draftValue(draft: Record<string, unknown>, field: { id: string; name: string }) {
+  if (Object.prototype.hasOwnProperty.call(draft, field.id)) return draft[field.id];
+  return draft[field.name];
+}
+
+function writeDraft(draft: Record<string, unknown>, field: { id: string; name: string }, value: unknown) {
+  draft[field.id] = value;
+  draft[field.name] = value;
+}
+
+function isTelegramFileId(value: string) {
+  return /^[A-Za-z0-9_-]{20,}$/.test(value);
 }
 
 async function upsertUser(from: From) {
@@ -312,7 +329,7 @@ export class TelegramConversationService {
           chatId,
           telegramUsername: from.username,
           telegramName: [from.first_name, from.last_name].filter(Boolean).join(" "),
-          fields: (state.draft as Record<string, unknown>) ?? {},
+          fields: await this.draftFieldsForSubmit(botId, from.id, String(state.requestTypeId)),
           attachments: (state.attachments as string[]) ?? [],
         });
         await patch(botId, from.id, { state: "SUBMITTED", draft: {}, attachments: [] });
@@ -321,7 +338,14 @@ export class TelegramConversationService {
           chatId,
           `تم إنشاء طلبك بنجاح.\nرقم الطلب: #${submitted.orderNumber}`,
         );
-      } catch {
+      } catch (err) {
+        logJson("error", "telegram", "ORDER_SUBMIT_FAILED", {
+          botId,
+          requestTypeId: String(state.requestTypeId),
+          telegramUserId: from.id,
+          error: err instanceof Error ? err.message : String(err),
+          stack: err instanceof Error ? err.stack : undefined,
+        });
         await TelegramService.sendMessage(
           botId,
           chatId,
@@ -360,6 +384,23 @@ export class TelegramConversationService {
       chatId,
       `📋 طلباتي\n\n${orders.map((o) => `#${o.orderNumber} — ${labels[String(o.status)] ?? o.status}`).join("\n")}`,
     );
+  }
+
+  static async draftFieldsForSubmit(botId: string, telegramUserId: number, requestTypeId: string) {
+    const db = await getDb();
+    const request = await db.collection(collections.requestTypes).findOne({
+      _id: new ObjectId(requestTypeId),
+    });
+    const fields = activeFields((request?.fields as RequestField[]) ?? []);
+    const state = await conv(botId, telegramUserId);
+    const draft = (state.draft as Record<string, unknown>) ?? {};
+    const mapped: Record<string, unknown> = {};
+    for (const field of fields) {
+      if (field.type === "INSTRUCTION") continue;
+      const value = draftValue(draft, field);
+      if (value !== undefined) mapped[field.name] = value;
+    }
+    return mapped;
   }
 
   static async askField(
@@ -409,7 +450,9 @@ export class TelegramConversationService {
     }
     if (field.type === "CHECKBOX") {
       const state = await conv(botId, telegramUserId);
-      const selected = new Set((state.draft as Record<string, unknown>)[field.name] as string[] ?? []);
+      const selected = new Set(
+        (draftValue((state.draft as Record<string, unknown>) ?? {}, field) as string[] | undefined) ?? [],
+      );
       const rows = (field.options ?? []).map((opt, idx) => [
         {
           text: `${selected.has(opt.value) ? "✅ " : ""}${opt.label}`,
@@ -451,22 +494,25 @@ export class TelegramConversationService {
 
     for (const f of fields) {
       if (f.type === "INSTRUCTION") continue;
-      const value = draft[f.name];
+      const value = draftValue(draft, f);
       if (f.type === "FILE" || f.type === "IMAGE") {
         const meta =
           value && typeof value === "object"
             ? (value as { telegramFileId?: string; kind?: "photo" | "document"; gridFsId?: string })
             : null;
-        const telegramFileId = meta?.telegramFileId || (typeof value === "string" ? value : "");
+        const telegramFileId =
+          meta?.telegramFileId ||
+          (typeof value === "string" && isTelegramFileId(value) ? value : "");
         const kind: "photo" | "document" =
           meta?.kind || (f.type === "IMAGE" ? "photo" : "document");
-        if (telegramFileId) {
+        const gridFsId = meta?.gridFsId ? String(meta.gridFsId) : undefined;
+        if (telegramFileId || gridFsId) {
           lines.push(`${f.label}: ${kind === "photo" ? "📷 صورة مرفقة" : "📎 ملف مرفق"}`);
           mediaPreview.push({
             label: f.label,
             telegramFileId,
             kind,
-            gridFsId: meta?.gridFsId,
+            gridFsId,
           });
         } else {
           lines.push(`${f.label}: —`);
@@ -484,6 +530,13 @@ export class TelegramConversationService {
         if (media.gridFsId) {
           const file = await GridFSStorageService.readBuffer(media.gridFsId);
           if (file?.buffer?.length) {
+            logJson("info", "telegram", "review_media_sending", {
+              botId,
+              label: media.label,
+              via: "gridfs",
+              bytes: file.buffer.length,
+              mimeType: file.mimeType,
+            });
             if (file.mimeType.startsWith("image/") || media.kind === "photo") {
               await TelegramService.sendPhoto(botId, chatId, file.buffer, file.filename, media.label);
             } else {
@@ -492,25 +545,36 @@ export class TelegramConversationService {
             continue;
           }
         }
+        if (!media.telegramFileId) {
+          throw new Error("NO_FILE_SOURCE");
+        }
+        logJson("info", "telegram", "review_media_sending", {
+          botId,
+          label: media.label,
+          via: "telegram_file_id",
+        });
         if (media.kind === "photo") {
           await TelegramService.sendExistingPhoto(botId, chatId, media.telegramFileId, media.label);
         } else {
           await TelegramService.sendExistingDocument(botId, chatId, media.telegramFileId, media.label);
         }
       } catch (err) {
-        logJson("warn", "telegram", "review_media_preview_failed", {
+        logJson("error", "telegram", "review_media_preview_failed", {
           botId,
           label: media.label,
           error: err instanceof Error ? err.message : String(err),
         });
+        console.error("REVIEW_MEDIA_PREVIEW_FAILED", { botId, label: media.label, error: err });
         try {
-          if (media.kind === "photo") {
-            await TelegramService.sendExistingDocument(botId, chatId, media.telegramFileId, media.label);
-          } else {
-            await TelegramService.sendExistingPhoto(botId, chatId, media.telegramFileId, media.label);
+          if (media.telegramFileId) {
+            if (media.kind === "photo") {
+              await TelegramService.sendExistingDocument(botId, chatId, media.telegramFileId, media.label);
+            } else {
+              await TelegramService.sendExistingPhoto(botId, chatId, media.telegramFileId, media.label);
+            }
           }
-        } catch {
-          /* ignore secondary preview failure */
+        } catch (fallbackErr) {
+          console.error("REVIEW_MEDIA_PREVIEW_FALLBACK_FAILED", fallbackErr);
         }
       }
     }
@@ -543,7 +607,7 @@ export class TelegramConversationService {
     if (kind === "o") {
       const opt = field.options?.[Number(optStr)];
       if (!opt) return;
-      draft[field.name] = persistValue(field, opt.value);
+      writeDraft(draft, field, persistValue(field, opt.value));
       await patch(botId, from.id, { draft, fieldIndex: index + 1 });
       await this.askField(botId, from.id, chatId, String(state.requestTypeId), index + 1);
       return;
@@ -551,27 +615,29 @@ export class TelegramConversationService {
     if (kind === "c") {
       const opt = field.options?.[Number(optStr)];
       if (!opt) return;
-      const selected = new Set((Array.isArray(draft[field.name]) ? draft[field.name] : []) as string[]);
+      const current = draftValue(draft, field);
+      const selected = new Set((Array.isArray(current) ? current : []) as string[]);
       if (selected.has(opt.value)) selected.delete(opt.value);
       else selected.add(opt.value);
-      draft[field.name] = [...selected];
+      writeDraft(draft, field, [...selected]);
       await patch(botId, from.id, { draft });
       await this.askField(botId, from.id, chatId, String(state.requestTypeId), index);
       return;
     }
     if (kind === "d") {
-      const selected = (draft[field.name] as string[] | undefined) ?? [];
+      const current = draftValue(draft, field);
+      const selected = (Array.isArray(current) ? current : []) as string[];
       if (field.required && selected.length === 0) {
         await TelegramService.sendMessage(botId, chatId, "يرجى اختيار خيار واحد على الأقل.");
         return;
       }
-      draft[field.name] = selected;
+      writeDraft(draft, field, selected);
       await patch(botId, from.id, { draft, fieldIndex: index + 1 });
       await this.askField(botId, from.id, chatId, String(state.requestTypeId), index + 1);
       return;
     }
     if (kind === "y" || kind === "n") {
-      draft[field.name] = kind === "y";
+      writeDraft(draft, field, kind === "y");
       await patch(botId, from.id, { draft, fieldIndex: index + 1 });
       await this.askField(botId, from.id, chatId, String(state.requestTypeId), index + 1);
     }
@@ -611,37 +677,74 @@ export class TelegramConversationService {
         return;
       }
       const kind: "photo" | "document" = msg?.photo?.length ? "photo" : "document";
-      try {
-        const stored = await persistTelegramUpload({
-          botId,
-          telegramUserId: from.id,
-          field,
-          telegramFileId: fileId,
-          kind,
-          filename: msg?.document?.file_name ?? null,
-          mimeType: msg?.document?.mime_type ?? null,
-          ownerId: `draft-${requestId}`,
+      const filename = msg?.document?.file_name ?? (kind === "photo" ? "photo.jpg" : null);
+      writeDraft(draft, field, {
+        telegramFileId: fileId,
+        kind,
+        gridFsId: null,
+        filename,
+      });
+
+      const next = index + 1;
+      await patch(botId, from.id, { draft, attachments, fieldIndex: next });
+
+      logJson("info", "telegram", "file_store_start", {
+        botId,
+        field: field.name,
+        kind,
+      });
+      void persistTelegramUpload({
+        botId,
+        telegramUserId: from.id,
+        field,
+        telegramFileId: fileId,
+        kind,
+        filename,
+        mimeType: msg?.document?.mime_type ?? null,
+        ownerId: `draft-${requestId}`,
+      })
+        .then(async (stored) => {
+          const current = await conv(botId, from.id);
+          const nextDraft = { ...((current.draft as Record<string, unknown>) ?? {}) };
+          const existing = draftValue(nextDraft, field);
+          const existingId =
+            existing && typeof existing === "object"
+              ? String((existing as { telegramFileId?: string }).telegramFileId ?? "")
+              : String(existing ?? "");
+          if (existingId && existingId !== fileId) return;
+          writeDraft(nextDraft, field, stored);
+          const nextAtt = [...new Set([...((current.attachments as string[]) ?? []), stored.gridFsId])];
+          await patch(botId, from.id, { draft: nextDraft, attachments: nextAtt });
+          logJson("info", "telegram", "file_store_ok", {
+            requestId,
+            botId,
+            field: field.name,
+            gridFsId: stored.gridFsId,
+          });
+        })
+        .catch((err) => {
+          const message = err instanceof Error ? err.message : String(err);
+          logJson("error", "telegram", "FILE_STORE_FAILED", {
+            requestId,
+            botId,
+            field: field.name,
+            error: message,
+          });
+          console.error("FILE_STORE_FAILED", { requestId, botId, field: field.name, error: message });
+          console.error(err);
         });
-        attachments.push(stored.gridFsId);
-        draft[field.name] = stored;
-      } catch (err) {
-        logJson("warn", "telegram", "FILE_STORE_FAILED", { requestId, botId, error: String(err) });
-        await TelegramService.sendMessage(
-          botId,
-          chatId,
-          "تعذر حفظ الملف. يرجى إعادة إرساله أو تجربة صيغة أخرى.",
-        );
-        return;
-      }
-    } else {
-      const value = msg?.text?.trim();
-      const error = validateFieldValue(field, value);
-      if (error) {
-        await TelegramService.sendMessage(botId, chatId, error);
-        return;
-      }
-      draft[field.name] = persistValue(field, value);
+
+      await this.askField(botId, from.id, chatId, String(state.requestTypeId), next);
+      return;
     }
+
+    const value = msg?.text?.trim();
+    const error = validateFieldValue(field, value);
+    if (error) {
+      await TelegramService.sendMessage(botId, chatId, error);
+      return;
+    }
+    writeDraft(draft, field, persistValue(field, value));
 
     const next = index + 1;
     await patch(botId, from.id, { draft, attachments, fieldIndex: next });

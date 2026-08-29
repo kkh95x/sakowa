@@ -1,0 +1,76 @@
+services:
+  app:
+    image: ${BOTHUB_IMAGE:-ghcr.io/kkh95x/bothub:latest}
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${PORT:-3320}:3000"
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: production
+      MONGODB_URI: mongodb://mongo:27017
+      MONGODB_DB_NAME: ${MONGODB_DB_NAME:-bothub}
+      GRIDFS_BUCKET: ${GRIDFS_BUCKET:-appFiles}
+      NEXT_PUBLIC_APP_URL: ${NEXT_PUBLIC_APP_URL:-https://bothub.mod-syria.org}
+      TELEGRAM_WEBHOOK_BASE_URL: ${TELEGRAM_WEBHOOK_BASE_URL:-https://bothub.mod-syria.org}
+      TELEGRAM_API_BASE_URL: ${TELEGRAM_API_BASE_URL:-http://telegram-bot-api:8081}
+    depends_on:
+      mongo:
+        condition: service_started
+      telegram-bot-api:
+        condition: service_started
+    networks:
+      - bothub-internal
+
+  # Local Bot API — required when TELEGRAM_API_BASE_URL=http://telegram-bot-api:8081
+  # Get TELEGRAM_API_ID + TELEGRAM_API_HASH from https://my.telegram.org (API development tools)
+  telegram-bot-api:
+    image: aiogram/telegram-bot-api:latest
+    restart: unless-stopped
+    environment:
+      TELEGRAM_API_ID: ${TELEGRAM_API_ID}
+      TELEGRAM_API_HASH: ${TELEGRAM_API_HASH}
+      TELEGRAM_HTTP_PORT: "8081"
+    volumes:
+      - bothub-telegram-api:/var/lib/telegram-bot-api
+    networks:
+      - bothub-internal
+
+  mongo:
+    image: mongo:7
+    restart: unless-stopped
+    volumes:
+      - bothub-mongo:/data/db
+    networks:
+      - bothub-internal
+
+  # One-off: docker compose -f docker-compose.prod.yml --env-file .env.prd --profile tools run --rm seed
+  seed:
+    image: node:20-bookworm-slim
+    working_dir: /app
+    volumes:
+      - .:/app
+    env_file:
+      - .env
+    environment:
+      MONGODB_URI: mongodb://mongo:27017
+      MONGODB_DB_NAME: ${MONGODB_DB_NAME:-bothub}
+    depends_on:
+      mongo:
+        condition: service_started
+    networks:
+      - bothub-internal
+    profiles:
+      - tools
+    command: sh -c "npm ci && npm run seed"
+
+networks:
+  bothub-internal:
+    driver: bridge
+
+volumes:
+  bothub-mongo:
+  bothub-telegram-api:

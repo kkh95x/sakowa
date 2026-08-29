@@ -2,6 +2,17 @@ import { ObjectId } from "mongodb";
 import { collections, getDb } from "@/lib/db/client";
 import { decrypt } from "@/lib/security/crypto";
 import { RequestTypeService } from "@/lib/requests/request-type-service";
+import { logJson } from "@/lib/log";
+import {
+  isBlockedWebhookBase,
+  normalizeTelegramFilePath,
+  pinnedTelegramIp,
+  telegramBotCall,
+  telegramBotMethodUrl,
+  telegramFetch,
+  telegramFetchFile,
+  telegramFileUrl,
+} from "@/lib/telegram/api";
 import type { OrderStatus, RequestField } from "@/types";
 
 async function botToken(botId: string) {
@@ -11,13 +22,19 @@ async function botToken(botId: string) {
   return decrypt(bot.tokenEncrypted);
 }
 
+type TelegramResponse = {
+  ok?: boolean;
+  description?: string;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  result?: any;
+};
+
 async function telegramCall(token: string, method: string, body: Record<string, unknown>) {
-  const res = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
+  return telegramBotCall<TelegramResponse>(token, method, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
-  return res.json();
 }
 
 import { resolveUploadMime } from "@/lib/storage/mime";
@@ -76,7 +93,7 @@ async function telegramUpload(
   file: { fieldName: string; filename: string; contentType: string; buffer: Buffer },
 ) {
   const multipart = buildTelegramMultipart(fields, file);
-  const res = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
+  const res = await telegramFetch(telegramBotMethodUrl(token, method), {
     method: "POST",
     headers: { "Content-Type": multipart.contentType },
     body: new Uint8Array(multipart.body),
@@ -95,9 +112,7 @@ const STATUS_AR: Record<OrderStatus, string> = {
 export class TelegramService {
   static webhookConfigured() {
     const base = (process.env.TELEGRAM_WEBHOOK_BASE_URL ?? "").trim();
-    if (!base) return false;
-    if (/example\.invalid/i.test(base)) return false;
-    if (/localhost|127\.0\.0\.1/i.test(base)) return false;
+    if (isBlockedWebhookBase(base)) return false;
     try {
       return new URL(base).protocol === "https:";
     } catch {
@@ -222,10 +237,13 @@ export class TelegramService {
               : "image/jpeg";
           const filename = mime === "image/png" ? "logo.png" : "logo.jpg";
           form.set("logo", new Blob([new Uint8Array(file.buffer)], { type: mime }), filename);
-          const photoRes = await fetch(`https://api.telegram.org/bot${token}/setMyProfilePhoto`, {
+          const photoRes = await telegramBotCall<{
+            ok?: boolean;
+            description?: string;
+          }>(token, "setMyProfilePhoto", {
             method: "POST",
             body: form,
-          }).then((r) => r.json());
+          });
           if (!photoRes?.ok) {
             photoError = String(photoRes?.description ?? "SET_PHOTO_FAILED");
           } else {
@@ -308,15 +326,76 @@ export class TelegramService {
   }
 
   static async downloadFile(botId: string, fileId: string) {
-    const token = await botToken(botId);
-    const meta = await telegramCall(token, "getFile", { file_id: fileId });
-    if (!meta.ok || !meta.result?.file_path) throw new Error("TELEGRAM_FILE");
-    const filePath = String(meta.result.file_path);
-    const res = await fetch(`https://api.telegram.org/file/bot${token}/${filePath}`);
-    if (!res.ok) throw new Error("TELEGRAM_FILE");
-    const buffer = Buffer.from(await res.arrayBuffer());
-    const filename = filePath.split("/").pop() ?? "telegram-file.bin";
-    return { buffer, filename, mimeType: mimeFromName(filename) };
+    let host = "unknown";
+    try {
+      const token = await botToken(botId);
+      const meta = await telegramCall(token, "getFile", { file_id: fileId });
+      if (!meta.ok || !meta.result?.file_path) {
+        throw new Error(`TELEGRAM_FILE: getFile ${String(meta?.description ?? "no file_path")}`);
+      }
+      const filePath = String(meta.result.file_path);
+      const filename = filePath.split(/[/\\]/).pop() ?? "telegram-file.bin";
+      const relativePath = normalizeTelegramFilePath(filePath);
+
+      logJson("info", "telegram", "file_get_ok", {
+        botId,
+        filePath: relativePath,
+        fileSize: meta.result.file_size ?? null,
+      });
+
+      if (filePath.startsWith("/") || /^[A-Za-z]:[\\/]/.test(filePath)) {
+        try {
+          const { readFile } = await import("node:fs/promises");
+          const buffer = await readFile(filePath);
+          if (buffer.length) {
+            logJson("info", "telegram", "file_download_ok", {
+              botId,
+              via: "disk",
+              bytes: buffer.length,
+            });
+            return { buffer, filename, mimeType: mimeFromName(filename) };
+          }
+        } catch (err) {
+          logJson("warn", "telegram", "file_disk_read_failed", {
+            botId,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+
+      const url = /^https?:\/\//i.test(filePath) ? filePath : telegramFileUrl(token, filePath);
+      try {
+        host = new URL(url).hostname;
+      } catch {
+        /* ignore */
+      }
+      logJson("info", "telegram", "file_download_start", {
+        botId,
+        host,
+        pinnedIp: pinnedTelegramIp(host) ?? null,
+      });
+      const res = await telegramFetchFile(url);
+      if (!res.ok) throw new Error(`TELEGRAM_FILE: download HTTP ${res.status}`);
+      const buffer = Buffer.from(await res.arrayBuffer());
+      if (!buffer.length) throw new Error("TELEGRAM_FILE: empty download");
+      logJson("info", "telegram", "file_download_ok", {
+        botId,
+        via: "http",
+        host,
+        bytes: buffer.length,
+      });
+      return { buffer, filename, mimeType: mimeFromName(filename) };
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      logJson("error", "telegram", "file_download_failed", {
+        botId,
+        host,
+        error: message,
+      });
+      console.error("TELEGRAM_FILE_DOWNLOAD_FAILED", { botId, host, error: message });
+      console.error(err);
+      throw err instanceof Error ? err : new Error(message);
+    }
   }
 
   static async sendDocument(botId: string, chatId: number, buffer: Buffer, filename: string, caption?: string) {

@@ -3,6 +3,7 @@ import { collections, getDb } from "@/lib/db/client";
 import { encrypt } from "@/lib/security/crypto";
 import { audit } from "@/lib/audit/audit";
 import { randomToken } from "@/lib/security/crypto";
+import { telegramBotCall } from "@/lib/telegram/api";
 import type { BotStatus } from "@/types";
 
 export type BotLastMessage = {
@@ -64,9 +65,11 @@ export class BotService {
     token: string;
     actorId: string;
   }) {
-    const me = await fetch(`https://api.telegram.org/bot${params.token}/getMe`);
-    const json = await me.json();
-    if (!json.ok) throw new Error("INVALID_BOT_TOKEN");
+    const json = await telegramBotCall<{ ok: boolean; result?: { username: string; id: number } }>(
+      params.token,
+      "getMe",
+    );
+    if (!json.ok || !json.result) throw new Error("INVALID_BOT_TOKEN");
     const webhookSecret = randomToken(16);
     const db = await getDb();
     const now = new Date();

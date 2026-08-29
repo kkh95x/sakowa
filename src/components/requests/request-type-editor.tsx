@@ -7,6 +7,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useToast } from "@/components/ui/toast";
 import type { FieldType, RequestField } from "@/types";
+import { nextFieldName } from "@/lib/requests/field-names";
 
 const FIELD_TYPES: FieldType[] = [
   "TEXT",
@@ -75,7 +76,7 @@ export function RequestTypeEditor({
       ...f,
       {
         id: crypto.randomUUID(),
-        name: `field_${f.length + 1}`,
+        name: nextFieldName(f),
         label: `حقل ${f.length + 1}`,
         type: "TEXT",
         required: true,

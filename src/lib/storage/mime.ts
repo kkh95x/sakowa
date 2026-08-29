@@ -17,6 +17,16 @@ const EXT_MIME: Record<string, string> = {
   ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
 };
 
+const MIME_ALIASES: Record<string, string> = {
+  "image/jpg": "image/jpeg",
+  "image/pjpeg": "image/jpeg",
+  "image/x-png": "image/png",
+  "application/x-pdf": "application/pdf",
+  "application/acrobat": "application/pdf",
+  "application/x-zip": "application/zip",
+  "application/zip-compressed": "application/zip",
+};
+
 export const ALLOWED_UPLOAD_MIMES = new Set([
   "image/jpeg",
   "image/png",
@@ -43,18 +53,22 @@ export function extensionOf(filename: string): string {
 }
 
 export function resolveUploadMime(filename: string, reportedMime?: string | null): string {
-  const reported = (reportedMime || "").trim().toLowerCase();
+  const reported = MIME_ALIASES[(reportedMime || "").trim().toLowerCase()] ?? (reportedMime || "").trim().toLowerCase();
   const ext = extensionOf(filename);
   const fromExt = EXT_MIME[ext];
   if (!reported || reported === "application/octet-stream") {
     return fromExt || "application/octet-stream";
   }
+  if (!ALLOWED_UPLOAD_MIMES.has(reported) && fromExt) {
+    return fromExt;
+  }
   return reported;
 }
 
 export function isAllowedUpload(mimeType: string, filename: string, allowGenericBinary = false): boolean {
-  if (!ALLOWED_UPLOAD_MIMES.has(mimeType)) return false;
-  if (mimeType === "application/octet-stream") {
+  const normalized = MIME_ALIASES[mimeType] ?? mimeType;
+  if (!ALLOWED_UPLOAD_MIMES.has(normalized)) return false;
+  if (normalized === "application/octet-stream") {
     return Boolean(EXT_MIME[extensionOf(filename)]) || allowGenericBinary;
   }
   return true;

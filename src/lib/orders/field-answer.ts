@@ -33,6 +33,9 @@ export function parseFieldAnswer(value: unknown, fieldType?: string): FieldAnswe
       filename?: string | null;
     };
     if (meta.telegramFileId || meta.kind || meta.gridFsId) {
+      if (fieldType && !isFileFieldType(fieldType)) {
+        return { kind: "text", text: meta.filename?.trim() || "—" };
+      }
       const isImage = meta.kind === "photo" || fieldType === "IMAGE";
       const label = meta.filename?.trim() || (isImage ? "📷 صورة" : "📎 ملف");
       return {
@@ -62,11 +65,16 @@ export function parseFieldAnswer(value: unknown, fieldType?: string): FieldAnswe
 }
 
 export function fieldAnswerFileUrl(orderId: string, fieldName: string, answer: FieldAnswer) {
-  if (answer.gridFsId) return `/api/files/${answer.gridFsId}`;
+  return fieldAnswerFileUrls(orderId, fieldName, answer)[0] ?? null;
+}
+
+export function fieldAnswerFileUrls(orderId: string, fieldName: string, answer: FieldAnswer) {
+  const urls: string[] = [];
+  if (answer.gridFsId) urls.push(`/api/files/${answer.gridFsId}`);
   if (answer.telegramFileId) {
-    return `/api/orders/${orderId}/field-file?field=${encodeURIComponent(fieldName)}`;
+    urls.push(`/api/orders/${orderId}/field-file?field=${encodeURIComponent(fieldName)}`);
   }
-  return null;
+  return urls;
 }
 
 export function fieldAnswerLabel(answer: FieldAnswer) {

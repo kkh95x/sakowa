@@ -1,7 +1,6 @@
-import { ensureIndexes } from "../src/lib/db/indexes";
 import { migrate } from "../src/lib/db/migrate";
 import { collections, getDb } from "../src/lib/db/client";
-import { hashPassword, storePasswordHistory } from "../src/lib/auth/password";
+import { ensureSuperAdmin, upsertSeedUser } from "../src/lib/db/bootstrap";
 
 async function main() {
   process.env.ENCRYPTION_KEY =
@@ -11,41 +10,15 @@ async function main() {
   process.env.MONGODB_DB_NAME = process.env.MONGODB_DB_NAME ?? "bothub";
 
   await migrate();
-  await ensureIndexes();
-  const db = await getDb();
 
+  const superResult = await ensureSuperAdmin();
   const superUser = process.env.SEED_SUPER_ADMIN_USERNAME ?? "superadmin";
-  const superPass = process.env.SEED_SUPER_ADMIN_PASSWORD ?? "ChangeMe!Super1";
+
   const adminUser = process.env.SEED_ADMIN_USERNAME ?? "admin";
   const adminPass = process.env.SEED_ADMIN_PASSWORD ?? "ChangeMe!Admin1";
+  const { id: adminId } = await upsertSeedUser(adminUser, "Demo Admin", adminPass, "ADMIN");
 
-  async function upsertUser(username: string, displayName: string, password: string, role: "SUPER_ADMIN" | "ADMIN") {
-    const existing = await db.collection(collections.users).findOne({ username });
-    if (existing) return String(existing._id);
-    const passwordHash = await hashPassword(password);
-    const now = new Date();
-    const result = await db.collection(collections.users).insertOne({
-      username,
-      displayName,
-      passwordHash,
-      role,
-      status: "ACTIVE",
-      twoFactorEnabled: false,
-      createdAt: now,
-      updatedAt: now,
-    });
-    await storePasswordHistory(String(result.insertedId), passwordHash);
-    return String(result.insertedId);
-  }
-
-  await upsertUser(superUser, "Super Admin", superPass, "SUPER_ADMIN");
-  const adminId = await upsertUser(adminUser, "Demo Admin", adminPass, "ADMIN");
-
-  await db.collection(collections.orderCounters).updateOne(
-    { key: "global" },
-    { $setOnInsert: { key: "global", seq: 0 } },
-    { upsert: true },
-  );
+  const db = await getDb();
 
   const bot = await db.collection(collections.bots).findOne({ username: "demo_bot" });
   let botId = bot ? String(bot._id) : null;
@@ -114,7 +87,7 @@ async function main() {
   }
 
   console.log("Seed complete");
-  console.log(`Super Admin: ${superUser}`);
+  console.log(`Super Admin: ${superUser}${superResult.created ? " (created)" : ""}`);
   console.log(`Admin: ${adminUser} (${adminId})`);
   process.exit(0);
 }

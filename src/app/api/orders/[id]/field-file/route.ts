@@ -5,21 +5,21 @@ import { collections, getDb } from "@/lib/db/client";
 import { OrderService } from "@/lib/orders/order-service";
 import { parseFieldAnswer } from "@/lib/orders/field-answer";
 import { GridFSStorageService } from "@/lib/storage/gridfs";
+import { fileHttpResponse } from "@/lib/storage/file-response";
+import { resolveUploadMime } from "@/lib/storage/mime";
 import { TelegramService } from "@/lib/telegram/telegram-service";
-import type { RequestField } from "@/types";
+import { logJson } from "@/lib/log";
+import type { FilePurpose, RequestField } from "@/types";
 
 type Ctx = { params: Promise<{ id: string }> };
 
-function contentDisposition(filename: string) {
-  const ascii = filename.replace(/[^\x20-\x7E]/g, "_").replace(/"/g, "") || "file.bin";
-  const encoded = encodeURIComponent(filename);
-  return `inline; filename="${ascii}"; filename*=UTF-8''${encoded}`;
-}
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
 export async function GET(req: Request, ctx: Ctx) {
+  const { id } = await ctx.params;
   try {
     await withAuth(["ADMIN", "SUPER_ADMIN"]);
-    const { id } = await ctx.params;
     const field = new URL(req.url).searchParams.get("field");
     if (!field) throw new Error("NO_FIELD");
 
@@ -38,26 +38,58 @@ export async function GET(req: Request, ctx: Ctx) {
 
     if (answer.gridFsId) {
       const file = await GridFSStorageService.readBuffer(answer.gridFsId);
-      if (!file) throw new Error("NOT_FOUND");
-      return new NextResponse(new Uint8Array(file.buffer), {
-        headers: {
-          "Content-Type": file.mimeType || "application/octet-stream",
-          "Content-Disposition": contentDisposition(file.filename),
-          "Cache-Control": "private, max-age=3600",
-        },
-      });
+      if (file) return fileHttpResponse(file);
     }
 
-    const downloaded = await TelegramService.downloadFile(String(order.botId), answer.telegramFileId!);
+    if (!answer.telegramFileId) throw new Error("NOT_FOUND");
+
+    const downloaded = await TelegramService.downloadFile(String(order.botId), answer.telegramFileId);
     const filename = answer.filename || downloaded.filename;
-    return new NextResponse(new Uint8Array(downloaded.buffer), {
-      headers: {
-        "Content-Type": downloaded.mimeType || "application/octet-stream",
-        "Content-Disposition": contentDisposition(filename),
-        "Cache-Control": "private, max-age=3600",
-      },
-    });
+    const mimeType = resolveUploadMime(filename, downloaded.mimeType);
+
+    try {
+      const purpose: FilePurpose = fieldDef?.type === "IMAGE" ? "REQUEST_IMAGE" : "ORDER_ATTACHMENT";
+      const gridFsId = await GridFSStorageService.save({
+        buffer: downloaded.buffer,
+        filename,
+        mimeType,
+        ownerType: "order",
+        ownerId: id,
+        uploadedBy: String(order.telegramUserId ?? "telegram"),
+        purpose,
+      });
+      const nextFields = {
+        ...values,
+        [field]: {
+          telegramFileId: answer.telegramFileId,
+          kind: answer.kind === "image" ? "photo" : "document",
+          gridFsId,
+          filename,
+        },
+      };
+      await db.collection(collections.orders).updateOne(
+        { _id: new ObjectId(id) },
+        {
+          $set: { fields: nextFields, updatedAt: new Date() },
+          $addToSet: { attachments: gridFsId },
+        },
+      );
+    } catch (err) {
+      logJson("error", "orders", "FIELD_FILE_BACKFILL_FAILED", {
+        orderId: id,
+        field,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      console.error("FIELD_FILE_BACKFILL_FAILED", { orderId: id, field, error: err });
+    }
+
+    return fileHttpResponse({ buffer: downloaded.buffer, mimeType, filename });
   } catch (err) {
+    logJson("error", "orders", "FIELD_FILE_GET_FAILED", {
+      orderId: id,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    console.error("FIELD_FILE_GET_FAILED", err);
     return errorToResponse(err);
   }
 }

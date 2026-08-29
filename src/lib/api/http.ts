@@ -21,6 +21,7 @@ export async function optionalUser() {
 
 export function errorToResponse(err: unknown) {
   const message = err instanceof Error ? err.message : "UNKNOWN";
+  const code = message.split(":")[0]?.trim() || message;
   const map: Record<string, number> = {
     UNAUTHORIZED: 401,
     FORBIDDEN: 403,
@@ -29,6 +30,11 @@ export function errorToResponse(err: unknown) {
     INVALID_CREDENTIALS: 401,
     INVALID_TOTP: 401,
     ACCOUNT_DISABLED: 403,
+    INVALID_BOT_TOKEN: 400,
+    TELEGRAM_UNREACHABLE: 502,
+    TELEGRAM_FILE: 502,
+    TELEGRAM_BAD_RESPONSE: 502,
+    FILE_READ_FAILED: 500,
   };
-  return fail(message, map[message] ?? 400);
+  return fail(message, map[code] ?? 400);
 }

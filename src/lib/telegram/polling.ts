@@ -6,11 +6,11 @@ const offsets = new Map<string, number>();
 const running = new Set<string>();
 const loops = new Map<string, Promise<void>>();
 
+import { isBlockedWebhookBase } from "@/lib/telegram/api";
+
 export function webhookBaseUsable() {
   const base = (process.env.TELEGRAM_WEBHOOK_BASE_URL ?? "").trim();
-  if (!base) return false;
-  if (/example\.invalid/i.test(base)) return false;
-  if (/localhost|127\.0\.0\.1/i.test(base)) return false;
+  if (isBlockedWebhookBase(base)) return false;
   try {
     const url = new URL(base);
     return url.protocol === "https:";

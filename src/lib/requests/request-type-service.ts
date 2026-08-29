@@ -2,6 +2,7 @@ import { ObjectId } from "mongodb";
 import { randomUUID } from "crypto";
 import { collections, getDb } from "@/lib/db/client";
 import { audit } from "@/lib/audit/audit";
+import { ensureUniqueFieldNames } from "@/lib/requests/field-names";
 import type { RequestField } from "@/types";
 
 async function syncCommands(botId: string) {
@@ -52,20 +53,22 @@ export class RequestTypeService {
     const _id = new ObjectId();
     const slug = `svc-${_id.toHexString()}`;
     const now = new Date();
-    const fields = (params.fields ?? []).map((f, i) => ({
-      ...f,
-      id: f.id || randomUUID(),
-      name: (f.name || `field_${i + 1}`).trim() || `field_${i + 1}`,
-      label: (f.label || `حقل ${i + 1}`).trim() || `حقل ${i + 1}`,
-      order: i,
-      required: Boolean(f.required),
-      sensitive: false,
-      active: f.active !== false,
-      options: f.options ?? [],
-      telegramMessage: f.telegramMessage ?? "",
-      ...(f.imageFileId ? { imageFileId: String(f.imageFileId) } : {}),
-      ...(f.attachmentFileId ? { attachmentFileId: String(f.attachmentFileId) } : {}),
-    }));
+    const fields = ensureUniqueFieldNames(
+      (params.fields ?? []).map((f, i) => ({
+        ...f,
+        id: f.id || randomUUID(),
+        name: (f.name || `field_${i + 1}`).trim() || `field_${i + 1}`,
+        label: (f.label || `حقل ${i + 1}`).trim() || `حقل ${i + 1}`,
+        order: i,
+        required: Boolean(f.required),
+        sensitive: false,
+        active: f.active !== false,
+        options: f.options ?? [],
+        telegramMessage: f.telegramMessage ?? "",
+        ...(f.imageFileId ? { imageFileId: String(f.imageFileId) } : {}),
+        ...(f.attachmentFileId ? { attachmentFileId: String(f.attachmentFileId) } : {}),
+      })),
+    );
     const active = Boolean(params.active);
     await db.collection(collections.requestTypes).insertOne({
       _id,
@@ -92,18 +95,20 @@ export class RequestTypeService {
 
   static async updateFields(id: string, fields: RequestField[], actorId: string) {
     const db = await getDb();
-    const normalized = fields.map((f, i) => ({
-      ...f,
-      id: f.id || randomUUID(),
-      order: i,
-      required: Boolean(f.required),
-      sensitive: false,
-      active: f.active !== false,
-      options: f.options ?? [],
-      telegramMessage: f.telegramMessage ?? "",
-      ...(f.imageFileId ? { imageFileId: String(f.imageFileId) } : {}),
-      ...(f.attachmentFileId ? { attachmentFileId: String(f.attachmentFileId) } : {}),
-    }));
+    const normalized = ensureUniqueFieldNames(
+      fields.map((f, i) => ({
+        ...f,
+        id: f.id || randomUUID(),
+        order: i,
+        required: Boolean(f.required),
+        sensitive: false,
+        active: f.active !== false,
+        options: f.options ?? [],
+        telegramMessage: f.telegramMessage ?? "",
+        ...(f.imageFileId ? { imageFileId: String(f.imageFileId) } : {}),
+        ...(f.attachmentFileId ? { attachmentFileId: String(f.attachmentFileId) } : {}),
+      })),
+    );
     await db.collection(collections.requestTypes).updateOne(
       { _id: new ObjectId(id) },
       { $set: { fields: normalized, updatedAt: new Date() } },

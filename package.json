@@ -14,7 +14,10 @@
     "indexes": "tsx scripts/ensure-indexes.ts",
     "docker:build": "docker build -t bothub:latest -t ghcr.io/kkh95x/bothub:latest .",
     "docker:up": "docker compose up -d",
-    "docker:down": "docker compose down"
+    "docker:down": "docker compose down",
+    "docker:prod:up": "docker compose -f docker-compose.prod.yml --env-file .env up -d",
+    "docker:prod:down": "docker compose -f docker-compose.prod.yml down",
+    "docker:prod:seed": "docker compose -f docker-compose.prod.yml --env-file .env --profile tools run --rm seed"
   },
   "dependencies": {
     "@radix-ui/react-dialog": "^1.1.15",

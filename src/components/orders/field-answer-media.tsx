@@ -4,7 +4,7 @@ import { useEffect, useMemo, useState } from "react";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
 import { Download, FileIcon, FileText, ImageIcon, Minus, Plus, X } from "lucide-react";
 import { cn } from "@/lib/utils";
-import { detectMediaType, fieldAnswerFileUrl, type FieldAnswer } from "@/lib/orders/field-answer";
+import { detectMediaType, fieldAnswerFileUrls, type FieldAnswer } from "@/lib/orders/field-answer";
 import { ar } from "@/i18n/ar";
 import { Button } from "@/components/ui/button";
 
@@ -123,17 +123,21 @@ export function FieldAnswerMedia({
   fieldName: string;
   answer: FieldAnswer;
 }) {
-  const fileUrl = fieldAnswerFileUrl(orderId, fieldName, answer);
+  const fileUrls = fieldAnswerFileUrls(orderId, fieldName, answer);
+  const fileUrl = fileUrls[0] ?? null;
   const [objectUrl, setObjectUrl] = useState<string | null>(null);
   const [mimeType, setMimeType] = useState<string | null>(null);
   const [failed, setFailed] = useState(false);
   const [loading, setLoading] = useState(false);
   const [viewerOpen, setViewerOpen] = useState(false);
+  const [reloadKey, setReloadKey] = useState(0);
 
   const displayName = answer.filename || answer.text || "file";
+  const urlsKey = fileUrls.join("|");
 
   useEffect(() => {
-    if (!fileUrl) {
+    const urls = urlsKey ? urlsKey.split("|") : [];
+    if (!urls.length) {
       setObjectUrl(null);
       setMimeType(null);
       setFailed(false);
@@ -146,15 +150,32 @@ export function FieldAnswerMedia({
     setObjectUrl(null);
     void (async () => {
       try {
-        const res = await fetch(fileUrl, { credentials: "include" });
-        if (!res.ok) throw new Error("load_failed");
-        const blob = await res.blob();
-        if (cancelled) return;
-        blobUrl = URL.createObjectURL(blob);
-        setMimeType(blob.type || null);
-        setObjectUrl(blobUrl);
-      } catch {
-        if (!cancelled) setFailed(true);
+        let lastError: unknown = null;
+        for (const url of urls) {
+          try {
+            const res = await fetch(url, { credentials: "include" });
+            if (!res.ok) {
+              lastError = new Error(`HTTP ${res.status}`);
+              continue;
+            }
+            const blob = await res.blob();
+            if (cancelled) return;
+            if (blob.type.includes("json") && blob.size < 512) {
+              lastError = new Error("not_a_file");
+              continue;
+            }
+            blobUrl = URL.createObjectURL(blob);
+            setMimeType(blob.type || null);
+            setObjectUrl(blobUrl);
+            return;
+          } catch (err) {
+            lastError = err;
+          }
+        }
+        if (!cancelled) {
+          console.warn("file_load_failed", lastError);
+          setFailed(true);
+        }
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -163,7 +184,7 @@ export function FieldAnswerMedia({
       cancelled = true;
       if (blobUrl) URL.revokeObjectURL(blobUrl);
     };
-  }, [fileUrl]);
+  }, [urlsKey, reloadKey]);
 
   const mediaType = useMemo(
     () => (objectUrl ? detectMediaType(answer, mimeType) : detectMediaType(answer)),
@@ -185,16 +206,24 @@ export function FieldAnswerMedia({
 
   return (
     <>
-      <button
-        type="button"
-        onClick={() => canPreview && objectUrl && setViewerOpen(true)}
-        disabled={!canPreview || !objectUrl || loading || failed}
+      <div
         className={cn(
           "mt-3 w-full overflow-hidden rounded-2xl border border-border bg-muted/20 text-start transition",
           canPreview && objectUrl ? "cursor-zoom-in hover:border-primary/40 hover:bg-muted/35" : "cursor-default",
         )}
       >
-        <div className="flex items-center gap-3 p-3">
+        <div
+          role={canPreview && objectUrl ? "button" : undefined}
+          tabIndex={canPreview && objectUrl ? 0 : undefined}
+          onClick={() => canPreview && objectUrl && setViewerOpen(true)}
+          onKeyDown={(e) => {
+            if ((e.key === "Enter" || e.key === " ") && canPreview && objectUrl) {
+              e.preventDefault();
+              setViewerOpen(true);
+            }
+          }}
+          className="flex items-center gap-3 p-3"
+        >
           <div className="relative flex size-16 shrink-0 items-center justify-center overflow-hidden rounded-xl border border-border bg-background">
             {loading ? (
               <span className="text-[10px] text-muted-foreground">{ar.loading}</span>
@@ -214,12 +243,28 @@ export function FieldAnswerMedia({
           </div>
           <div className="min-w-0 flex-1">
             <div className="truncate text-sm font-medium">{displayName}</div>
-            <div className="mt-0.5 text-xs text-primary">
-              {canPreview && objectUrl ? ar.previewAttachment : ar.viewAttachedFile}
+            <div className={`mt-0.5 text-xs ${failed ? "text-danger" : "text-primary"}`}>
+              {failed
+                ? ar.fileLoadFailed
+                : canPreview && objectUrl
+                  ? ar.previewAttachment
+                  : ar.viewAttachedFile}
             </div>
+            {failed ? (
+              <button
+                type="button"
+                className="mt-1 text-xs text-primary underline"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setReloadKey((k) => k + 1);
+                }}
+              >
+                {ar.retryLoadFile}
+              </button>
+            ) : null}
           </div>
         </div>
-      </button>
+      </div>
 
       {!canPreview && objectUrl ? (
         <div className="mt-2">

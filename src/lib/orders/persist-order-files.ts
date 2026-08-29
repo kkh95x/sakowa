@@ -1,4 +1,5 @@
 import { ObjectId } from "mongodb";
+import { logJson } from "@/lib/log";
 import { GridFSStorageService } from "@/lib/storage/gridfs";
 import { resolveUploadMime } from "@/lib/storage/mime";
 import { TelegramService } from "@/lib/telegram/telegram-service";
@@ -24,7 +25,7 @@ function normalizeFileField(
 
   if (typeof raw === "string") {
     const trimmed = raw.trim();
-    if (!trimmed) return null;
+    if (!trimmed || !/^[A-Za-z0-9_-]{20,}$/.test(trimmed)) return null;
     const kind: "photo" | "document" = field.type === "IMAGE" ? "photo" : "document";
     return {
       meta: {
@@ -96,29 +97,52 @@ export async function persistOrderFieldFiles(params: {
       throw new Error(`FILE_NOT_STORED:${field.name}`);
     }
 
-    const downloaded = await TelegramService.downloadFile(params.botId, meta.telegramFileId);
-    const filename =
-      meta.filename?.trim() ||
-      downloaded.filename ||
-      (meta.kind === "photo" ? "photo.jpg" : "attachment.bin");
-    const mimeType = resolveUploadMime(filename, downloaded.mimeType);
-    const gridFsId = await GridFSStorageService.save({
-      buffer: downloaded.buffer,
-      filename,
-      mimeType,
-      ownerType: "order",
-      ownerId: params.orderId,
-      uploadedBy: String(params.telegramUserId),
-      purpose: filePurpose(field, meta.kind),
-    });
+    // A failed copy into GridFS must not discard the order: the Telegram file id
+    // stays usable as a fallback source for admins viewing the answer.
+    try {
+      const downloaded = await TelegramService.downloadFile(params.botId, meta.telegramFileId);
+      const filename =
+        meta.filename?.trim() ||
+        downloaded.filename ||
+        (meta.kind === "photo" ? "photo.jpg" : "attachment.bin");
+      const mimeType = resolveUploadMime(filename, downloaded.mimeType);
+      const gridFsId = await GridFSStorageService.save({
+        buffer: downloaded.buffer,
+        filename,
+        mimeType,
+        ownerType: "order",
+        ownerId: params.orderId,
+        uploadedBy: String(params.telegramUserId),
+        purpose: filePurpose(field, meta.kind),
+      });
 
-    fields[field.name] = {
-      telegramFileId: meta.telegramFileId,
-      kind: meta.kind,
-      gridFsId,
-      filename,
-    };
-    attachments.add(gridFsId);
+      fields[field.name] = {
+        telegramFileId: meta.telegramFileId,
+        kind: meta.kind,
+        gridFsId,
+        filename,
+      };
+      attachments.add(gridFsId);
+    } catch (err) {
+      logJson("error", "orders", "FIELD_FILE_PERSIST_FAILED", {
+        orderId: params.orderId,
+        botId: params.botId,
+        field: field.name,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      console.error("FIELD_FILE_PERSIST_FAILED", {
+        orderId: params.orderId,
+        botId: params.botId,
+        field: field.name,
+        error: err,
+      });
+      fields[field.name] = {
+        telegramFileId: meta.telegramFileId,
+        kind: meta.kind,
+        gridFsId: null,
+        filename: meta.filename,
+      };
+    }
   }
 
   return { fields, attachments: [...attachments] };
