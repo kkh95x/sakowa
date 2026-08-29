@@ -17,6 +17,7 @@ export async function POST(_req: Request, ctx: Ctx) {
       category: "BOTS",
       action: "BOT_SYNCED_TELEGRAM",
       entityId: id,
+      after: { name: bot.name, details: bot.details ?? "", result },
     });
     return json({ ok: true, result });
   } catch (err) {

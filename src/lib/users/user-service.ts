@@ -47,15 +47,27 @@ export class UserService {
       action: "ADMIN_CREATED",
       entityType: "user",
       entityId: String(result.insertedId),
+      after: {
+        id: String(result.insertedId),
+        username: params.username.trim(),
+        displayName: params.displayName.trim(),
+        role: params.role,
+        status: "ACTIVE",
+      },
     });
     return String(result.insertedId);
   }
 
   static async updateStatus(id: string, status: UserStatus, actorId: string) {
     const db = await getDb();
+    const before = await db.collection(collections.users).findOne(
+      { _id: new ObjectId(id) },
+      { projection: { passwordHash: 0, twoFactorSecretEncrypted: 0, twoFactorPendingSecretEncrypted: 0 } },
+    );
+    const updatedAt = new Date();
     await db.collection(collections.users).updateOne(
       { _id: new ObjectId(id) },
-      { $set: { status, updatedAt: new Date() } },
+      { $set: { status, updatedAt } },
     );
     if (status !== "ACTIVE") await revokeAllUserSessions(id);
     await audit({
@@ -64,6 +76,8 @@ export class UserService {
       action: "ADMIN_STATUS_CHANGED",
       entityId: id,
       metadata: { status },
+      before,
+      after: { ...before, status, updatedAt },
     });
   }
 

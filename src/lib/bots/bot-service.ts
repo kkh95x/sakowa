@@ -88,6 +88,13 @@ export class BotService {
       category: "BOTS",
       action: "BOT_CREATED",
       entityId: String(result.insertedId),
+      after: {
+        id: String(result.insertedId),
+        name: params.name,
+        username: json.result.username,
+        telegramBotId: json.result.id,
+        status: "STOPPED",
+      },
     });
     return String(result.insertedId);
   }
@@ -97,6 +104,10 @@ export class BotService {
     params: { name?: string; details?: string; logoFileId?: string; actorId: string },
   ) {
     const db = await getDb();
+    const before = await db.collection(collections.bots).findOne(
+      { _id: new ObjectId(id) },
+      { projection: { tokenEncrypted: 0, webhookSecret: 0 } },
+    );
     const $set: Record<string, unknown> = { updatedAt: new Date() };
     if (params.name !== undefined) $set.name = params.name;
     if (params.details !== undefined) $set.details = params.details;
@@ -107,16 +118,30 @@ export class BotService {
       category: "BOTS",
       action: "BOT_UPDATED",
       entityId: id,
+      before,
+      after: { ...before, ...$set },
     });
   }
 
   static async setStatus(id: string, status: BotStatus, actorId: string, action: string) {
     const db = await getDb();
+    const before = await db.collection(collections.bots).findOne(
+      { _id: new ObjectId(id) },
+      { projection: { tokenEncrypted: 0, webhookSecret: 0 } },
+    );
+    const updatedAt = new Date();
     await db.collection(collections.bots).updateOne(
       { _id: new ObjectId(id) },
-      { $set: { status, updatedAt: new Date() } },
+      { $set: { status, updatedAt } },
     );
-    await audit({ actorUserId: actorId, category: "BOTS", action, entityId: id });
+    await audit({
+      actorUserId: actorId,
+      category: "BOTS",
+      action,
+      entityId: id,
+      before,
+      after: { ...before, status, updatedAt },
+    });
   }
 
   static async remove(id: string, actorId: string) {
@@ -128,6 +153,12 @@ export class BotService {
       { $set: { archivedAt: new Date(), active: false, updatedAt: new Date() } },
     );
     await db.collection(collections.bots).deleteOne({ _id: new ObjectId(id) });
-    await audit({ actorUserId: actorId, category: "BOTS", action: "BOT_DELETED", entityId: id });
+    await audit({
+      actorUserId: actorId,
+      category: "BOTS",
+      action: "BOT_DELETED",
+      entityId: id,
+      before: bot,
+    });
   }
 }

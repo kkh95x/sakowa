@@ -20,6 +20,11 @@ export async function optionalUser() {
 }
 
 export function errorToResponse(err: unknown) {
+  if (err && typeof err === "object" && "issues" in err) {
+    const issues = (err as { issues?: { message?: string }[] }).issues;
+    const message = issues?.[0]?.message || "INVALID";
+    return fail(message, 400);
+  }
   const message = err instanceof Error ? err.message : "UNKNOWN";
   const code = message.split(":")[0]?.trim() || message;
   const map: Record<string, number> = {

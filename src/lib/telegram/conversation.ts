@@ -5,7 +5,10 @@ import { OrderService } from "@/lib/orders/order-service";
 import { TelegramService } from "@/lib/telegram/telegram-service";
 import { GridFSStorageService } from "@/lib/storage/gridfs";
 import { persistTelegramUpload } from "@/lib/orders/persist-order-files";
+import { ChatLogService } from "@/lib/chat/chat-log-service";
 import { persistValue, validateFieldValue } from "@/lib/telegram/validate-field";
+import { displayChoice, optionLabel } from "@/lib/orders/field-answer";
+import { callbackButtonLabel, isSlashCommand } from "@/lib/chat/callback-label";
 import { ensureUniqueFieldNames } from "@/lib/requests/field-names";
 import { logJson } from "@/lib/log";
 import { correlationId } from "@/lib/security/crypto";
@@ -34,12 +37,25 @@ type Update = {
     id: string;
     data?: string;
     from: From;
-    message?: { chat: { id: number } };
+    message?: CallbackMessage;
   };
+};
+
+type CallbackMessage = {
+  chat: { id: number };
+  message_id?: number;
+  text?: string;
+  caption?: string;
+  photo?: { file_id: string }[];
+  reply_markup?: { inline_keyboard?: { text?: string; callback_data?: string }[][] };
 };
 
 function kb(rows: { text: string; callback_data: string }[][]) {
   return { reply_markup: { inline_keyboard: rows } };
+}
+
+function buttonLabel(data: string, source?: CallbackMessage, fallback?: string) {
+  return callbackButtonLabel(data, source?.reply_markup?.inline_keyboard) || fallback || "";
 }
 
 function activeFields(fields: RequestField[]) {
@@ -147,6 +163,41 @@ function optionRows(field: RequestField, index: number) {
   return options.map((opt, i) => [{ text: opt.label, callback_data: `o:${index}:${i}` }]);
 }
 
+function checkboxRows(field: RequestField, index: number, selected: Set<string>) {
+  const rows = (field.options ?? []).map((opt, idx) => [
+    {
+      text: `${selected.has(opt.value) ? "✅ " : ""}${opt.label}`,
+      callback_data: `c:${index}:${idx}`,
+    },
+  ]);
+  rows.push([{ text: "تم", callback_data: `d:${index}` }]);
+  return rows;
+}
+
+async function revealChoice(
+  botId: string,
+  from: From,
+  chatId: number,
+  source: CallbackMessage | undefined,
+  choice: string,
+) {
+  const text = choice.trim();
+  if (!text) return;
+  const edited = source?.message_id
+    ? await TelegramService.revealInlineChoice(botId, chatId, source, text)
+    : false;
+  if (!edited) {
+    await TelegramService.sendMessage(botId, chatId, text, { log: false });
+  }
+  void ChatLogService.captureInbound({
+    botId,
+    telegramUserId: from.id,
+    chatId,
+    text,
+    kind: "command",
+  });
+}
+
 export class TelegramConversationService {
   static async process(botId: string, update: Update) {
     const db = await getDb();
@@ -168,6 +219,24 @@ export class TelegramConversationService {
     if (!from || chatId === undefined) return;
     await upsertUser(from);
     await recordLastInbound(botId, from, msg, Boolean(cb));
+    if (msg && msg.chat.type === "private") {
+      const photoId = msg.photo?.at(-1)?.file_id ?? null;
+      const docId = msg.document?.file_id ?? null;
+      const inboundText = msg.text?.trim() || null;
+      if (inboundText || photoId || docId) {
+        void ChatLogService.captureInbound({
+          botId,
+          telegramUserId: from.id,
+          chatId,
+          text: inboundText,
+          photoFileId: photoId,
+          documentFileId: docId,
+          filename: msg.document?.file_name ?? (photoId ? "photo.jpg" : null),
+          mimeType: msg.document?.mime_type ?? null,
+          kind: isSlashCommand(inboundText) ? "command" : undefined,
+        });
+      }
+    }
 
     if (msg && (msg.chat.type === "group" || msg.chat.type === "supergroup")) {
       const messageThreadId =
@@ -237,7 +306,7 @@ export class TelegramConversationService {
       }
     }
     if (cb?.data) {
-      await this.onCallback(botId, from, chatId, cb.data);
+      await this.onCallback(botId, from, chatId, cb.data, cb.message);
       return;
     }
     const state = await conv(botId, from.id);
@@ -246,7 +315,13 @@ export class TelegramConversationService {
     }
   }
 
-  static async startService(botId: string, from: From, chatId: number, requestTypeId: string) {
+  static async startService(
+    botId: string,
+    from: From,
+    chatId: number,
+    requestTypeId: string,
+    source?: CallbackMessage,
+  ) {
     const db = await getDb();
     const request = await db.collection(collections.requestTypes).findOne({
       _id: new ObjectId(requestTypeId),
@@ -262,6 +337,7 @@ export class TelegramConversationService {
       await TelegramService.sendMessage(botId, chatId, "لا يمكنك استخدام هذه الخدمة حالياً.");
       return;
     }
+    await revealChoice(botId, from, chatId, source, String(request.name));
     await patch(botId, from.id, {
       state: "WAITING_FOR_FIELD",
       requestTypeId,
@@ -272,9 +348,16 @@ export class TelegramConversationService {
     await this.askField(botId, from.id, chatId, requestTypeId, 0);
   }
 
-  static async onCallback(botId: string, from: From, chatId: number, data: string) {
+  static async onCallback(
+    botId: string,
+    from: From,
+    chatId: number,
+    data: string,
+    source?: CallbackMessage,
+  ) {
     const db = await getDb();
     if (data === "menu:help") {
+      await revealChoice(botId, from, chatId, source, buttonLabel(data, source, "ℹ️ المساعدة"));
       await TelegramService.sendMessage(
         botId,
         chatId,
@@ -283,6 +366,7 @@ export class TelegramConversationService {
       return;
     }
     if (data === "menu:my") {
+      await revealChoice(botId, from, chatId, source, buttonLabel(data, source, "📋 طلباتي"));
       await this.sendMyOrders(botId, from.id, chatId);
       return;
     }
@@ -306,15 +390,16 @@ export class TelegramConversationService {
     }
     if (data.startsWith("req:")) {
       const requestTypeId = data.slice(4);
-      await this.startService(botId, from, chatId, requestTypeId);
+      await this.startService(botId, from, chatId, requestTypeId, source);
       return;
     }
     if (data.startsWith("o:") || data.startsWith("c:") || data.startsWith("d:") || data.startsWith("y:") || data.startsWith("n:")) {
       const state = await conv(botId, from.id);
-      await this.onChoice(botId, from, chatId, state, data);
+      await this.onChoice(botId, from, chatId, state, data, source);
       return;
     }
     if (data === "confirm:yes") {
+      await revealChoice(botId, from, chatId, source, buttonLabel(data, source, "تأكيد"));
       const state = await conv(botId, from.id);
       if (!state.requestTypeId) return;
       if (await BlockedUserService.isBlocked(from.id, String(state.requestTypeId))) {
@@ -355,6 +440,7 @@ export class TelegramConversationService {
       return;
     }
     if (data === "confirm:no") {
+      await revealChoice(botId, from, chatId, source, buttonLabel(data, source, "إلغاء"));
       await patch(botId, from.id, { state: "CANCELLED", draft: {}, attachments: [] });
       await TelegramService.sendMessage(botId, chatId, "تم إلغاء الطلب.");
     }
@@ -453,14 +539,7 @@ export class TelegramConversationService {
       const selected = new Set(
         (draftValue((state.draft as Record<string, unknown>) ?? {}, field) as string[] | undefined) ?? [],
       );
-      const rows = (field.options ?? []).map((opt, idx) => [
-        {
-          text: `${selected.has(opt.value) ? "✅ " : ""}${opt.label}`,
-          callback_data: `c:${i}:${idx}`,
-        },
-      ]);
-      rows.push([{ text: "تم", callback_data: `d:${i}` }]);
-      await TelegramService.sendFieldPrompt(botId, chatId, prompt, field, kb(rows));
+      await TelegramService.sendFieldPrompt(botId, chatId, prompt, field, kb(checkboxRows(field, i, selected)));
       return;
     }
     if (field.type === "CONFIRMATION") {
@@ -491,6 +570,7 @@ export class TelegramConversationService {
     const lines: string[] = [];
     const mediaPreview: { label: string; telegramFileId: string; kind: "photo" | "document"; gridFsId?: string }[] =
       [];
+    if (request?.name) lines.push(`الخدمة: ${request.name}`);
 
     for (const f of fields) {
       if (f.type === "INSTRUCTION") continue;
@@ -519,7 +599,7 @@ export class TelegramConversationService {
         }
         continue;
       }
-      const display = Array.isArray(value) ? value.join(", ") : (value ?? "-");
+      const display = displayChoice(f, value) || "—";
       lines.push(`${f.label}: ${display}`);
     }
 
@@ -593,6 +673,7 @@ export class TelegramConversationService {
     chatId: number,
     state: Record<string, unknown>,
     data: string,
+    source?: CallbackMessage,
   ) {
     const [kind, indexStr, optStr] = data.split(":");
     const index = Number(indexStr);
@@ -609,6 +690,7 @@ export class TelegramConversationService {
       if (!opt) return;
       writeDraft(draft, field, persistValue(field, opt.value));
       await patch(botId, from.id, { draft, fieldIndex: index + 1 });
+      await revealChoice(botId, from, chatId, source, buttonLabel(data, source, opt.label));
       await this.askField(botId, from.id, chatId, String(state.requestTypeId), index + 1);
       return;
     }
@@ -621,6 +703,19 @@ export class TelegramConversationService {
       else selected.add(opt.value);
       writeDraft(draft, field, [...selected]);
       await patch(botId, from.id, { draft });
+      if (source?.message_id) {
+        try {
+          const edited = await TelegramService.editReplyMarkup(
+            botId,
+            chatId,
+            source.message_id,
+            kb(checkboxRows(field, index, selected)),
+          );
+          if (edited?.ok) return;
+        } catch {
+          /* send a fresh prompt */
+        }
+      }
       await this.askField(botId, from.id, chatId, String(state.requestTypeId), index);
       return;
     }
@@ -633,12 +728,20 @@ export class TelegramConversationService {
       }
       writeDraft(draft, field, selected);
       await patch(botId, from.id, { draft, fieldIndex: index + 1 });
+      await revealChoice(
+        botId,
+        from,
+        chatId,
+        source,
+        selected.map((value) => optionLabel(field, value)).join("، ") || "—",
+      );
       await this.askField(botId, from.id, chatId, String(state.requestTypeId), index + 1);
       return;
     }
     if (kind === "y" || kind === "n") {
       writeDraft(draft, field, kind === "y");
       await patch(botId, from.id, { draft, fieldIndex: index + 1 });
+      await revealChoice(botId, from, chatId, source, buttonLabel(data, source, kind === "y" ? "نعم" : "لا"));
       await this.askField(botId, from.id, chatId, String(state.requestTypeId), index + 1);
     }
   }
@@ -666,6 +769,26 @@ export class TelegramConversationService {
     const attachments = [...((state.attachments as string[]) ?? [])];
 
     if (field.type === "SELECT" || field.type === "RADIO" || field.type === "CHECKBOX" || field.type === "CONFIRMATION") {
+      const typed = msg?.text?.trim();
+      if (typed && (field.type === "SELECT" || field.type === "RADIO")) {
+        const opt = field.options?.find((o) => o.label === typed || o.value === typed);
+        if (opt) {
+          writeDraft(draft, field, persistValue(field, opt.value));
+          await patch(botId, from.id, { draft, fieldIndex: index + 1 });
+          await this.askField(botId, from.id, chatId, String(state.requestTypeId), index + 1);
+          return;
+        }
+      }
+      if (typed && field.type === "CONFIRMATION") {
+        const yes = typed === "نعم" || /^yes$/i.test(typed);
+        const no = typed === "لا" || /^no$/i.test(typed);
+        if (yes || no) {
+          writeDraft(draft, field, yes);
+          await patch(botId, from.id, { draft, fieldIndex: index + 1 });
+          await this.askField(botId, from.id, chatId, String(state.requestTypeId), index + 1);
+          return;
+        }
+      }
       await this.askField(botId, from.id, chatId, String(state.requestTypeId), index);
       return;
     }
@@ -715,6 +838,13 @@ export class TelegramConversationService {
           writeDraft(nextDraft, field, stored);
           const nextAtt = [...new Set([...((current.attachments as string[]) ?? []), stored.gridFsId])];
           await patch(botId, from.id, { draft: nextDraft, attachments: nextAtt });
+          void ChatLogService.linkFile({
+            botId,
+            telegramUserId: from.id,
+            telegramFileId: fileId,
+            gridFsId: stored.gridFsId,
+            filename: stored.filename,
+          });
           logJson("info", "telegram", "file_store_ok", {
             requestId,
             botId,

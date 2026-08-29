@@ -73,7 +73,8 @@ export type FilePurpose =
   | "ORDER_ATTACHMENT"
   | "ADMIN_ATTACHMENT"
   | "BOT_MEDIA"
-  | "BOT_LOGO";
+  | "BOT_LOGO"
+  | "USER_AVATAR";
 
 export interface RequestField {
   id: string;

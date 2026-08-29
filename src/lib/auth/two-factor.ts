@@ -75,7 +75,13 @@ export class TwoFactorService {
         $unset: { twoFactorPendingSecretEncrypted: "" },
       },
     );
-    await audit({ actorUserId: userId, category: "SECURITY", action: "2FA_ENABLED" });
+    await audit({
+      actorUserId: userId,
+      category: "SECURITY",
+      action: "2FA_ENABLED",
+      before: { twoFactorEnabled: false },
+      after: { twoFactorEnabled: true },
+    });
     return codes;
   }
 
@@ -114,6 +120,12 @@ export class TwoFactorService {
       },
     );
     await db.collection(collections.twoFactorRecoveryCodes).deleteMany({ userId });
-    await audit({ actorUserId: userId, category: "SECURITY", action: "2FA_DISABLED" });
+    await audit({
+      actorUserId: userId,
+      category: "SECURITY",
+      action: "2FA_DISABLED",
+      before: { twoFactorEnabled: true },
+      after: { twoFactorEnabled: false },
+    });
   }
 }

@@ -23,6 +23,10 @@ export function Dialog({
   size = "md",
   className,
   bodyClassName,
+  headerClassName,
+  footerClassName,
+  header,
+  headerActions,
   nested = false,
 }: {
   open: boolean;
@@ -34,6 +38,10 @@ export function Dialog({
   size?: keyof typeof SIZE_CLASS;
   className?: string;
   bodyClassName?: string;
+  headerClassName?: string;
+  footerClassName?: string;
+  header?: ReactNode;
+  headerActions?: ReactNode;
   nested?: boolean;
 }) {
   return (
@@ -47,23 +55,37 @@ export function Dialog({
         />
         <DialogPrimitive.Content
           className={cn(
-            "fixed left-1/2 top-1/2 flex max-h-[min(92vh,880px)] -translate-x-1/2 -translate-y-1/2 flex-col overflow-hidden rounded-3xl border border-border bg-card shadow-2xl outline-none",
+            "fixed left-1/2 top-1/2 flex max-h-[min(calc(100dvh-1.5rem),880px)] min-h-0 -translate-x-1/2 -translate-y-1/2 flex-col overflow-y-auto overscroll-contain rounded-3xl border border-border bg-card shadow-2xl outline-none [-webkit-overflow-scrolling:touch]",
             nested ? "z-[71]" : "z-50",
             SIZE_CLASS[size],
             className,
           )}
         >
-          <header className="flex shrink-0 items-start justify-between gap-3 border-b border-border px-5 py-4 sm:px-6">
-            <div className="min-w-0 space-y-1">
-              <DialogPrimitive.Title className="text-lg font-bold leading-tight">{title}</DialogPrimitive.Title>
-              {description ? (
-                <DialogPrimitive.Description className="text-sm text-muted-foreground">
-                  {description}
-                </DialogPrimitive.Description>
-              ) : (
-                <DialogPrimitive.Description className="sr-only">{title}</DialogPrimitive.Description>
-              )}
-            </div>
+          <header
+            className={cn(
+              "sticky top-0 z-10 flex shrink-0 items-start justify-between gap-3 border-b border-border bg-card px-5 py-4 sm:px-6",
+              headerClassName,
+            )}
+          >
+            {header ? (
+              <div className="min-w-0 flex-1">{header}</div>
+            ) : (
+              <div className="min-w-0 space-y-1">
+                <DialogPrimitive.Title className="text-lg font-bold leading-tight text-inherit">{title}</DialogPrimitive.Title>
+                {description ? (
+                  <DialogPrimitive.Description className="text-sm text-muted-foreground">
+                    {description}
+                  </DialogPrimitive.Description>
+                ) : (
+                  <DialogPrimitive.Description className="sr-only">{title}</DialogPrimitive.Description>
+                )}
+              </div>
+            )}
+            {header ? <DialogPrimitive.Title className="sr-only">{title}</DialogPrimitive.Title> : null}
+            {header ? (
+              <DialogPrimitive.Description className="sr-only">{description || title}</DialogPrimitive.Description>
+            ) : null}
+            {headerActions}
             <DialogPrimitive.Close
               className="rounded-xl p-1.5 text-muted-foreground transition hover:bg-muted hover:text-foreground"
               aria-label={ar.cancel}
@@ -72,12 +94,17 @@ export function Dialog({
             </DialogPrimitive.Close>
           </header>
 
-          <div className={cn("min-h-0 flex-1 overflow-y-auto px-5 py-4 sm:px-6", bodyClassName)}>
+          <div className={cn("px-5 py-4 sm:px-6", bodyClassName)}>
             {children}
           </div>
 
           {footer ? (
-            <footer className="flex shrink-0 flex-wrap items-center justify-end gap-2 border-t border-border bg-card/95 px-5 py-3 sm:px-6">
+            <footer
+              className={cn(
+                "sticky bottom-0 z-10 flex shrink-0 flex-wrap items-center justify-end gap-2 border-t border-border bg-card px-5 py-3 max-sm:pb-[max(0.75rem,env(safe-area-inset-bottom))] sm:px-6",
+                footerClassName,
+              )}
+            >
               {footer}
             </footer>
           ) : null}

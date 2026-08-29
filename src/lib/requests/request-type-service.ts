@@ -88,6 +88,16 @@ export class RequestTypeService {
       category: "REQUESTS",
       action: "REQUEST_TYPE_CREATED",
       entityId: String(_id),
+      after: {
+        id: String(_id),
+        name: params.name.trim(),
+        slug,
+        botId: params.botId,
+        description: params.description ?? "",
+        fields,
+        active,
+        telegramGroupId: params.telegramGroupId ?? null,
+      },
     });
     if (active) await syncCommands(params.botId);
     return { id: String(_id), slug };
@@ -109,25 +119,36 @@ export class RequestTypeService {
         ...(f.attachmentFileId ? { attachmentFileId: String(f.attachmentFileId) } : {}),
       })),
     );
+    const existing = await db.collection(collections.requestTypes).findOne({ _id: new ObjectId(id) });
     await db.collection(collections.requestTypes).updateOne(
       { _id: new ObjectId(id) },
       { $set: { fields: normalized, updatedAt: new Date() } },
     );
-    await audit({ actorUserId: actorId, category: "REQUESTS", action: "REQUEST_FIELDS_UPDATED", entityId: id });
+    await audit({
+      actorUserId: actorId,
+      category: "REQUESTS",
+      action: "REQUEST_FIELDS_UPDATED",
+      entityId: id,
+      before: existing,
+      after: { ...existing, fields: normalized, updatedAt: new Date() },
+    });
   }
 
   static async setActive(id: string, active: boolean, actorId: string) {
     const db = await getDb();
     const item = await db.collection(collections.requestTypes).findOne({ _id: new ObjectId(id) });
+    const updatedAt = new Date();
     await db.collection(collections.requestTypes).updateOne(
       { _id: new ObjectId(id) },
-      { $set: { active, updatedAt: new Date() } },
+      { $set: { active, updatedAt } },
     );
     await audit({
       actorUserId: actorId,
       category: "REQUESTS",
       action: active ? "REQUEST_ACTIVATED" : "REQUEST_DEACTIVATED",
       entityId: id,
+      before: item,
+      after: { ...item, active, updatedAt },
     });
     if (item?.botId) await syncCommands(String(item.botId));
   }
@@ -135,21 +156,38 @@ export class RequestTypeService {
   static async archive(id: string, actorId: string) {
     const db = await getDb();
     const item = await db.collection(collections.requestTypes).findOne({ _id: new ObjectId(id) });
+    const updatedAt = new Date();
     await db.collection(collections.requestTypes).updateOne(
       { _id: new ObjectId(id) },
-      { $set: { archivedAt: new Date(), active: false, updatedAt: new Date() } },
+      { $set: { archivedAt: updatedAt, active: false, updatedAt } },
     );
-    await audit({ actorUserId: actorId, category: "REQUESTS", action: "REQUEST_ARCHIVED", entityId: id });
+    await audit({
+      actorUserId: actorId,
+      category: "REQUESTS",
+      action: "REQUEST_ARCHIVED",
+      entityId: id,
+      before: item,
+      after: { ...item, archivedAt: updatedAt, active: false, updatedAt },
+    });
     if (item?.botId) await syncCommands(String(item.botId));
   }
 
   static async linkGroup(id: string, telegramGroupId: string | null, actorId: string) {
     const db = await getDb();
+    const existing = await db.collection(collections.requestTypes).findOne({ _id: new ObjectId(id) });
+    const updatedAt = new Date();
     await db.collection(collections.requestTypes).updateOne(
       { _id: new ObjectId(id) },
-      { $set: { telegramGroupId, updatedAt: new Date() } },
+      { $set: { telegramGroupId, updatedAt } },
     );
-    await audit({ actorUserId: actorId, category: "REQUESTS", action: "REQUEST_GROUP_LINKED", entityId: id });
+    await audit({
+      actorUserId: actorId,
+      category: "REQUESTS",
+      action: "REQUEST_GROUP_LINKED",
+      entityId: id,
+      before: existing,
+      after: { ...existing, telegramGroupId, updatedAt },
+    });
   }
 
   static async update(
@@ -163,7 +201,14 @@ export class RequestTypeService {
     if (params.description !== undefined) $set.description = params.description;
     if (params.botId !== undefined) $set.botId = params.botId;
     await db.collection(collections.requestTypes).updateOne({ _id: new ObjectId(id) }, { $set });
-    await audit({ actorUserId: params.actorId, category: "REQUESTS", action: "REQUEST_TYPE_UPDATED", entityId: id });
+    await audit({
+      actorUserId: params.actorId,
+      category: "REQUESTS",
+      action: "REQUEST_TYPE_UPDATED",
+      entityId: id,
+      before: existing,
+      after: { ...existing, ...$set },
+    });
     const bots = new Set<string>();
     if (existing?.botId) bots.add(String(existing.botId));
     if (params.botId) bots.add(params.botId);

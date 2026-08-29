@@ -73,6 +73,12 @@ export async function ensureIndexes() {
     { unique: true },
   );
 
+  await db.collection(collections.telegramChatMessages).createIndexes([
+    { key: { botId: 1, telegramUserId: 1, createdAt: 1 } },
+    { key: { orderId: 1, createdAt: 1 } },
+    { key: { telegramFileId: 1 } },
+  ]);
+
   await db.collection(collections.orderCounters).createIndex({ key: 1 }, { unique: true });
 
   await db.collection(collections.telegramGroups).createIndexes([

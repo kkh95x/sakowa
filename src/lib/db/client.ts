@@ -52,5 +52,6 @@ export const collections = {
   auditLogs: "auditLogs",
   twoFactorRecoveryCodes: "twoFactorRecoveryCodes",
   telegramUpdates: "telegramUpdates",
+  telegramChatMessages: "telegramChatMessages",
   passwordHistory: "passwordHistory",
 } as const;

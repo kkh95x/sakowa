@@ -1,11 +1,19 @@
 "use client";
 
-import { createContext, useCallback, useContext, useState, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useState, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import { AnimatePresence, motion } from "framer-motion";
 
 type Toast = { id: number; text: string };
 
 const Ctx = createContext<(text: string) => void>(() => undefined);
+
+function ToastViewport({ children }: { children: ReactNode }) {
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => setMounted(true), []);
+  if (!mounted) return null;
+  return createPortal(children, document.body);
+}
 
 export function ToastProvider({ children }: { children: ReactNode }) {
   const [toasts, setToasts] = useState<Toast[]>([]);
@@ -17,21 +25,23 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   return (
     <Ctx.Provider value={push}>
       {children}
-      <div className="pointer-events-none fixed start-4 bottom-4 z-50 flex flex-col gap-2">
-        <AnimatePresence>
-          {toasts.map((t) => (
-            <motion.div
-              key={t.id}
-              initial={{ opacity: 0, y: 12, scale: 0.96 }}
-              animate={{ opacity: 1, y: 0, scale: 1 }}
-              exit={{ opacity: 0, y: 8 }}
-              className="pointer-events-auto rounded-xl bg-secondary px-4 py-3 text-sm text-primary-foreground shadow-lg"
-            >
-              {t.text}
-            </motion.div>
-          ))}
-        </AnimatePresence>
-      </div>
+      <ToastViewport>
+        <div className="pointer-events-none fixed start-4 bottom-4 z-[200] flex flex-col gap-2">
+          <AnimatePresence>
+            {toasts.map((t) => (
+              <motion.div
+                key={t.id}
+                initial={{ opacity: 0, y: 12, scale: 0.96 }}
+                animate={{ opacity: 1, y: 0, scale: 1 }}
+                exit={{ opacity: 0, y: 8 }}
+                className="pointer-events-auto rounded-xl bg-secondary px-4 py-3 text-sm text-primary-foreground shadow-lg"
+              >
+                {t.text}
+              </motion.div>
+            ))}
+          </AnimatePresence>
+        </div>
+      </ToastViewport>
     </Ctx.Provider>
   );
 }

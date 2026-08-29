@@ -1,3 +1,4 @@
+import { serializeAuditLog } from "@/lib/audit/audit";
 import { errorToResponse, json, withAuth } from "@/lib/api/http";
 import { collections, getDb } from "@/lib/db/client";
 
@@ -20,7 +21,7 @@ export async function GET(req: Request) {
       .skip((page - 1) * 30)
       .limit(30)
       .toArray();
-    return json({ logs: items.map((l) => ({ ...l, id: String(l._id) })) });
+    return json({ logs: items.map((l) => serializeAuditLog(l as Record<string, unknown>)) });
   } catch (err) {
     return errorToResponse(err);
   }

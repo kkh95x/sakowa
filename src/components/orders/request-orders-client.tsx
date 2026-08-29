@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useParams, useRouter, useSearchParams } from "next/navigation";
+import { MessageCircle } from "lucide-react";
 import { ar } from "@/i18n/ar";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -10,6 +11,7 @@ import { operatorsForField } from "@/lib/orders/filter-builder";
 import type { FilterOperator, OrderFilter, OrderStatus, RequestField } from "@/types";
 import { useToast } from "@/components/ui/toast";
 import { fieldAnswerLabel, parseFieldAnswer } from "@/lib/orders/field-answer";
+import { OrderChatDialog } from "@/components/orders/order-chat-dialog";
 
 const STATUSES: OrderStatus[] = ["PENDING", "REVIEWING", "COMPLETED", "REJECTED", "ARCHIVED"];
 
@@ -84,6 +86,7 @@ export default function RequestOrdersClient() {
   const [draftOperator, setDraftOperator] = useState<FilterOperator>("eq");
   const [draftValue, setDraftValue] = useState("");
   const [draftValueTo, setDraftValueTo] = useState("");
+  const [chatOrderId, setChatOrderId] = useState<string | null>(null);
 
   const columns = useMemo(
     () => (requestType?.fields ?? []).filter(isTableField).sort((a, b) => a.order - b.order),
@@ -344,6 +347,7 @@ export default function RequestOrdersClient() {
             <thead className="bg-muted/60">
               <tr>
                 <th className="px-3 py-2 text-start">{ar.orderNumber}</th>
+                <th className="px-3 py-2 text-start">{ar.actions}</th>
                 <th className="px-3 py-2 text-start">{ar.telegramUsername}</th>
                 <th className="px-3 py-2 text-start">{ar.telegramName}</th>
                 <th className="px-3 py-2 text-start">{ar.telegramId}</th>
@@ -354,13 +358,31 @@ export default function RequestOrdersClient() {
                 ))}
                 <th className="px-3 py-2 text-start">{ar.orderTime}</th>
                 <th className="px-3 py-2 text-start">{ar.status}</th>
-                <th className="px-3 py-2 text-start">{ar.actions}</th>
               </tr>
             </thead>
             <tbody>
               {orders.map((order) => (
                 <tr key={order.id} className="border-t border-border hover:bg-muted/30">
                   <td className="px-3 py-2 font-medium">{order.orderNumber}</td>
+                  <td className="px-3 py-2">
+                    <div className="flex items-center gap-1.5 whitespace-nowrap">
+                      <a
+                        className="inline-flex items-center rounded-xl border border-border px-2.5 py-1.5 text-sm hover:bg-muted"
+                        href={`/orders/${order.id}`}
+                      >
+                        {ar.open}
+                      </a>
+                      <button
+                        type="button"
+                        className="inline-flex items-center gap-1 rounded-xl bg-[#517da2] px-2.5 py-1.5 text-sm text-white hover:opacity-90"
+                        onClick={() => setChatOrderId(order.id)}
+                        title={ar.openConversation}
+                      >
+                        <MessageCircle className="size-3.5" />
+                        {ar.openConversation}
+                      </button>
+                    </div>
+                  </td>
                   <td className="px-3 py-2">
                     {order.telegramUsername ? `@${order.telegramUsername}` : "—"}
                   </td>
@@ -373,14 +395,6 @@ export default function RequestOrdersClient() {
                   ))}
                   <td className="px-3 py-2 whitespace-nowrap">{formatTime(order.createdAt)}</td>
                   <td className="px-3 py-2">{STATUS_LABEL[order.status]}</td>
-                  <td className="px-3 py-2">
-                    <a
-                      className="inline-flex items-center rounded-xl border border-border px-3 py-1.5 text-sm hover:bg-muted"
-                      href={`/orders/${order.id}`}
-                    >
-                      {ar.open}
-                    </a>
-                  </td>
                 </tr>
               ))}
             </tbody>
@@ -399,11 +413,7 @@ export default function RequestOrdersClient() {
 
         <div className="grid gap-3 md:hidden">
           {orders.map((order) => (
-            <a
-              key={order.id}
-              href={`/orders/${order.id}`}
-              className="rounded-2xl border border-border bg-card p-4 text-start hover:bg-muted/40"
-            >
+            <div key={order.id} className="rounded-2xl border border-border bg-card p-4 text-start">
               <div className="flex items-start justify-between gap-2">
                 <div className="font-semibold">{order.orderNumber}</div>
                 <div className="text-xs text-muted-foreground">{STATUS_LABEL[order.status]}</div>
@@ -420,7 +430,24 @@ export default function RequestOrdersClient() {
                 ))}
               </div>
               <div className="mt-2 text-xs text-muted-foreground">{formatTime(order.createdAt)}</div>
-            </a>
+              <div className="mt-3 flex flex-nowrap items-center gap-2">
+                <a
+                  href={`/orders/${order.id}`}
+                  className="inline-flex items-center rounded-xl border border-border px-3 py-1.5 text-sm hover:bg-muted"
+                >
+                  {ar.open}
+                </a>
+                <button
+                  type="button"
+                  className="inline-flex items-center gap-1 rounded-xl bg-[#517da2] px-3 py-1.5 text-sm text-white hover:opacity-90"
+                  onClick={() => setChatOrderId(order.id)}
+                  title={ar.openConversation}
+                >
+                  <MessageCircle className="size-3.5" />
+                  {ar.openConversation}
+                </button>
+              </div>
+            </div>
           ))}
           {!loadingOrders && orders.length === 0 && (
             <div className="rounded-2xl border border-border bg-card p-6 text-center">
@@ -468,6 +495,14 @@ export default function RequestOrdersClient() {
           </div>
         </div>
       </div>
+      <OrderChatDialog
+        orderId={chatOrderId}
+        open={Boolean(chatOrderId)}
+        onOpenChange={(next) => {
+          if (!next) setChatOrderId(null);
+        }}
+        onOrderIdChange={setChatOrderId}
+      />
     </div>
   );
 }

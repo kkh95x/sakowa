@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useParams } from "next/navigation";
-import { Ban, MessageSquare, Paperclip, RefreshCw } from "lucide-react";
+import { Ban, MessageCircle, MessageSquare, Paperclip, RefreshCw } from "lucide-react";
 import { ar } from "@/i18n/ar";
 import { Button } from "@/components/ui/button";
 import { Dialog } from "@/components/ui/dialog";
@@ -11,6 +11,7 @@ import { Label } from "@/components/ui/label";
 import { formatTime } from "@/lib/utils";
 import { useToast } from "@/components/ui/toast";
 import { FieldAnswerMedia } from "@/components/orders/field-answer-media";
+import { OrderChatDialog } from "@/components/orders/order-chat-dialog";
 import { parseFieldAnswer } from "@/lib/orders/field-answer";
 import type { OrderStatus, RequestField } from "@/types";
 
@@ -37,6 +38,7 @@ export default function OrderDetailsPage() {
   const toast = useToast();
   const [data, setData] = useState<Record<string, unknown> | null>(null);
   const [dialog, setDialog] = useState<DialogKind>(null);
+  const [chatOpen, setChatOpen] = useState(false);
   const [message, setMessage] = useState("");
   const [statusFile, setStatusFile] = useState<File | null>(null);
   const [attachFile, setAttachFile] = useState<File | null>(null);
@@ -304,6 +306,10 @@ export default function OrderDetailsPage() {
             <RefreshCw className="size-4" />
             {ar.changeStatus}
           </Button>
+          <Button type="button" variant="secondary" onClick={() => setChatOpen(true)}>
+            <MessageCircle className="size-4" />
+            {ar.openConversation}
+          </Button>
           <Button type="button" variant="secondary" onClick={() => setDialog("message")}>
             <MessageSquare className="size-4" />
             {ar.sendMessage}
@@ -318,6 +324,12 @@ export default function OrderDetailsPage() {
           </Button>
         </div>
       </div>
+
+      <OrderChatDialog
+        orderId={typeof id === "string" ? id : Array.isArray(id) ? id[0] : null}
+        open={chatOpen}
+        onOpenChange={setChatOpen}
+      />
 
       <Dialog
         open={dialog === "status"}

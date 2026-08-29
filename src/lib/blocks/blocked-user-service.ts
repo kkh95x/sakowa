@@ -56,16 +56,36 @@ export class BlockedUserService {
       category: "BLOCKS",
       action: "USER_BLOCKED",
       entityId: String(result.insertedId),
+      after: {
+        id: String(result.insertedId),
+        telegramUserId: params.telegramUserId,
+        username: params.username ?? null,
+        firstName: params.firstName ?? null,
+        lastName: params.lastName ?? null,
+        botId: params.botId,
+        requestTypeId: params.requestTypeId,
+        reason: params.reason ?? "",
+        active: true,
+      },
     });
     return String(result.insertedId);
   }
 
   static async unblock(id: string, actorId: string) {
     const db = await getDb();
+    const before = await db.collection(collections.telegramUserBlocks).findOne({ _id: new ObjectId(id) });
+    const unblockedAt = new Date();
     await db.collection(collections.telegramUserBlocks).updateOne(
       { _id: new ObjectId(id) },
-      { $set: { active: false, unblockedBy: actorId, unblockedAt: new Date() } },
+      { $set: { active: false, unblockedBy: actorId, unblockedAt } },
     );
-    await audit({ actorUserId: actorId, category: "BLOCKS", action: "USER_UNBLOCKED", entityId: id });
+    await audit({
+      actorUserId: actorId,
+      category: "BLOCKS",
+      action: "USER_UNBLOCKED",
+      entityId: id,
+      before,
+      after: { ...before, active: false, unblockedBy: actorId, unblockedAt },
+    });
   }
 }

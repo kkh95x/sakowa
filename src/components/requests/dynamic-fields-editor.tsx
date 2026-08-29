@@ -291,7 +291,7 @@ export function DynamicFieldsEditor({
   }
 
   return (
-    <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-2xl border border-border bg-card">
+    <div className="flex min-h-0 flex-col rounded-2xl border border-border bg-card">
       <div className="flex shrink-0 items-center justify-between gap-2 border-b border-border px-4 py-3">
         <div className="text-sm font-semibold">
           {ar.fields}
@@ -303,9 +303,9 @@ export function DynamicFieldsEditor({
         </Button>
       </div>
 
-      <div className="min-h-0 flex-1 overflow-y-auto p-3">
+      <div className="p-3">
         {fields.length === 0 ? (
-          <div className="flex h-full min-h-[180px] flex-col items-center justify-center gap-3 text-center">
+          <div className="flex min-h-[180px] flex-col items-center justify-center gap-3 text-center">
             <p className="text-sm text-muted-foreground">{ar.fieldsListEmpty}</p>
             <Button type="button" variant="outline" onClick={addField}>
               <Plus className="size-4" />

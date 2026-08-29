@@ -62,6 +62,13 @@ export class TelegramGroupService {
       category: "GROUPS",
       action: "GROUP_CREATED",
       entityId: String(result.insertedId),
+      after: {
+        id: String(result.insertedId),
+        title: params.title.trim(),
+        chatId,
+        messageThreadId,
+        type: params.type ?? "supergroup",
+      },
     });
     return String(result.insertedId);
   }
@@ -77,6 +84,7 @@ export class TelegramGroupService {
     },
   ) {
     const db = await getDb();
+    const before = await db.collection(collections.telegramGroups).findOne({ _id: new ObjectId(id) });
     const $set: Record<string, unknown> = { updatedAt: new Date() };
     if (params.title !== undefined) $set.title = params.title.trim();
     if (params.chatId !== undefined) $set.chatId = normalizeChatId(params.chatId);
@@ -91,11 +99,14 @@ export class TelegramGroupService {
       category: "GROUPS",
       action: "GROUP_UPDATED",
       entityId: id,
+      before,
+      after: { ...before, ...$set },
     });
   }
 
   static async remove(id: string, actorId: string) {
     const db = await getDb();
+    const before = await db.collection(collections.telegramGroups).findOne({ _id: new ObjectId(id) });
     await db.collection(collections.telegramGroups).deleteOne({ _id: new ObjectId(id) });
     await db.collection(collections.requestTypes).updateMany(
       { telegramGroupId: id },
@@ -106,6 +117,7 @@ export class TelegramGroupService {
       category: "GROUPS",
       action: "GROUP_DELETED",
       entityId: id,
+      before,
     });
   }
 }

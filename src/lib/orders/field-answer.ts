@@ -1,4 +1,5 @@
 import { ar } from "@/i18n/ar";
+import type { RequestField } from "@/types";
 
 export type FieldAnswer = {
   kind: "empty" | "text" | "file" | "image";
@@ -62,6 +63,26 @@ export function parseFieldAnswer(value: unknown, fieldType?: string): FieldAnswe
   }
 
   return { kind: "text", text: String(value) };
+}
+
+export function optionLabel(field: Pick<RequestField, "options">, value: unknown): string {
+  const raw = String(value ?? "");
+  const opt = field.options?.find((o) => o.value === raw || o.label === raw);
+  return opt?.label ?? raw;
+}
+
+export function displayChoice(field: RequestField, value: unknown): string {
+  if (value === undefined || value === null || value === "") return "";
+  if (field.type === "CONFIRMATION") {
+    if (value === true || value === "true") return ar.operators.yes;
+    if (value === false || value === "false") return ar.operators.no;
+  }
+  if (Array.isArray(value)) {
+    return value.map((item) => optionLabel(field, item)).filter(Boolean).join("، ");
+  }
+  if (field.options?.length) return optionLabel(field, value);
+  const parsed = parseFieldAnswer(value, field.type);
+  return parsed.kind === "empty" ? "" : parsed.text;
 }
 
 export function fieldAnswerFileUrl(orderId: string, fieldName: string, answer: FieldAnswer) {

@@ -3,6 +3,7 @@ import { collections, getDb } from "@/lib/db/client";
 import { decrypt } from "@/lib/security/crypto";
 import { RequestTypeService } from "@/lib/requests/request-type-service";
 import { logJson } from "@/lib/log";
+import { ChatLogService } from "@/lib/chat/chat-log-service";
 import {
   isBlockedWebhookBase,
   normalizeTelegramFilePath,
@@ -35,6 +36,11 @@ async function telegramCall(token: string, method: string, body: Record<string, 
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
+}
+
+function telegramMessageId(result: TelegramResponse | null | undefined) {
+  const id = result?.result?.message_id;
+  return typeof id === "number" && Number.isFinite(id) ? id : null;
 }
 
 import { resolveUploadMime } from "@/lib/storage/mime";
@@ -299,25 +305,148 @@ export class TelegramService {
 
   static async sendMessage(botId: string, chatId: number, text: string, extra?: Record<string, unknown>) {
     const token = await botToken(botId);
-    return telegramCall(token, "sendMessage", { chat_id: chatId, text, ...extra });
+    const body = { ...(extra ?? {}) };
+    const log = body.log !== false;
+    delete body.log;
+    const result = await telegramCall(token, "sendMessage", { chat_id: chatId, text, ...body });
+    if (log) {
+      void ChatLogService.captureOutbound({
+        botId,
+        chatId,
+        kind: "text",
+        text,
+        telegramMessageId: telegramMessageId(result),
+      });
+    }
+    return result;
+  }
+
+  static async revealInlineChoice(
+    botId: string,
+    chatId: number,
+    message: {
+      message_id?: number;
+      text?: string;
+      caption?: string;
+      photo?: unknown[];
+    },
+    choice: string,
+  ): Promise<boolean> {
+    const messageId = message.message_id;
+    if (!messageId || !choice.trim()) return false;
+    const hasMedia = Boolean(message.photo?.length);
+    const previous = String((hasMedia ? message.caption : message.text) ?? "").trimEnd();
+    const next = previous.includes(choice) ? previous : `${previous}\n\n${choice}`.trim();
+    if (!next) return false;
+    const token = await botToken(botId);
+    try {
+      const result = hasMedia
+        ? await telegramCall(token, "editMessageCaption", {
+            chat_id: chatId,
+            message_id: messageId,
+            caption: next.slice(0, 1024),
+            reply_markup: { inline_keyboard: [] },
+          })
+        : await telegramCall(token, "editMessageText", {
+            chat_id: chatId,
+            message_id: messageId,
+            text: next,
+            reply_markup: { inline_keyboard: [] },
+          });
+      return Boolean(result?.ok);
+    } catch {
+      return false;
+    }
+  }
+
+  static async editReplyMarkup(
+    botId: string,
+    chatId: number,
+    messageId: number,
+    extra?: Record<string, unknown>,
+  ) {
+    const token = await botToken(botId);
+    return telegramCall(token, "editMessageReplyMarkup", {
+      chat_id: chatId,
+      message_id: messageId,
+      ...extra,
+    });
+  }
+
+  static async editOutgoingMessage(
+    botId: string,
+    chatId: number,
+    messageId: number,
+    kind: "text" | "photo" | "document" | "command",
+    text: string,
+  ) {
+    const token = await botToken(botId);
+    const isMedia = kind === "photo" || kind === "document";
+    try {
+      const result = isMedia
+        ? await telegramCall(token, "editMessageCaption", {
+            chat_id: chatId,
+            message_id: messageId,
+            caption: text.slice(0, 1024),
+          })
+        : await telegramCall(token, "editMessageText", {
+            chat_id: chatId,
+            message_id: messageId,
+            text: text.slice(0, 4096) || "\u200b",
+          });
+      return Boolean(result?.ok);
+    } catch {
+      return false;
+    }
+  }
+
+  static async deleteOutgoingMessage(botId: string, chatId: number, messageId: number) {
+    const token = await botToken(botId);
+    try {
+      const result = await telegramCall(token, "deleteMessage", {
+        chat_id: chatId,
+        message_id: messageId,
+      });
+      return Boolean(result?.ok);
+    } catch {
+      return false;
+    }
   }
 
   static async sendExistingPhoto(botId: string, chatId: number, fileId: string, caption?: string) {
     const token = await botToken(botId);
-    return telegramCall(token, "sendPhoto", {
+    const result = await telegramCall(token, "sendPhoto", {
       chat_id: chatId,
       photo: fileId,
       ...(caption ? { caption: caption.slice(0, 1024) } : {}),
     });
+    void ChatLogService.captureOutbound({
+      botId,
+      chatId,
+      kind: "photo",
+      text: caption ?? null,
+      telegramFileId: fileId,
+      telegramMessageId: telegramMessageId(result),
+    });
+    return result;
   }
 
   static async sendExistingDocument(botId: string, chatId: number, fileId: string, caption?: string) {
     const token = await botToken(botId);
-    return telegramCall(token, "sendDocument", {
+    const result = await telegramCall(token, "sendDocument", {
       chat_id: chatId,
       document: fileId,
       ...(caption ? { caption: caption.slice(0, 1024) } : {}),
     });
+    void ChatLogService.captureOutbound({
+      botId,
+      chatId,
+      kind: "document",
+      text: caption ?? null,
+      telegramFileId: fileId,
+      telegramMessageId: telegramMessageId(result),
+    });
+    return result;
   }
 
   static async answerCallback(botId: string, callbackQueryId: string) {
@@ -429,6 +558,16 @@ export class TelegramService {
       buffer,
     });
     if (!json?.ok) throw new Error(String(json?.description ?? "SEND_DOCUMENT_FAILED"));
+    void ChatLogService.captureOutbound({
+      botId,
+      chatId,
+      kind: "document",
+      text: caption ?? null,
+      filename,
+      mimeType: contentType,
+      telegramFileId: json.result?.document?.file_id ? String(json.result.document.file_id) : null,
+      telegramMessageId: telegramMessageId(json),
+    });
     return json;
   }
 
@@ -449,7 +588,73 @@ export class TelegramService {
       buffer,
     });
     if (!json?.ok) throw new Error(String(json?.description ?? "SEND_PHOTO_FAILED"));
+    const photoId = Array.isArray(json.result?.photo)
+      ? json.result.photo.at(-1)?.file_id
+      : json.result?.photo?.file_id;
+    void ChatLogService.captureOutbound({
+      botId,
+      chatId,
+      kind: "photo",
+      text: caption ?? null,
+      filename,
+      mimeType: contentType,
+      telegramFileId: photoId ? String(photoId) : null,
+      telegramMessageId: telegramMessageId(json),
+    });
     return json;
+  }
+
+  static async syncUserProfilePhoto(botId: string, telegramUserId: number): Promise<string | null> {
+    const db = await getDb();
+    const existing = await db.collection(collections.telegramUsers).findOne({ telegramUserId });
+    const syncedAt = existing?.photoSyncedAt ? new Date(String(existing.photoSyncedAt)).getTime() : 0;
+    if (existing?.photoFileId && Date.now() - syncedAt < 12 * 60 * 60 * 1000) {
+      return String(existing.photoFileId);
+    }
+    try {
+      const token = await botToken(botId);
+      const meta = await telegramCall(token, "getUserProfilePhotos", {
+        user_id: telegramUserId,
+        limit: 1,
+      });
+      const sizes = meta.result?.photos?.[0] as { file_id?: string }[] | undefined;
+      const fileId = sizes?.at(-1)?.file_id;
+      if (!fileId) {
+        await db.collection(collections.telegramUsers).updateOne(
+          { telegramUserId },
+          { $set: { photoSyncedAt: new Date() }, $setOnInsert: { telegramUserId, firstSeenAt: new Date() } },
+          { upsert: true },
+        );
+        return existing?.photoFileId ? String(existing.photoFileId) : null;
+      }
+      const downloaded = await this.downloadFile(botId, fileId);
+      const { GridFSStorageService } = await import("@/lib/storage/gridfs");
+      const gridFsId = await GridFSStorageService.save({
+        buffer: downloaded.buffer,
+        filename: downloaded.filename || "avatar.jpg",
+        mimeType: downloaded.mimeType || "image/jpeg",
+        ownerType: "telegram_user",
+        ownerId: String(telegramUserId),
+        uploadedBy: "telegram",
+        purpose: "USER_AVATAR",
+      });
+      await db.collection(collections.telegramUsers).updateOne(
+        { telegramUserId },
+        {
+          $set: { photoFileId: gridFsId, photoSyncedAt: new Date() },
+          $setOnInsert: { telegramUserId, firstSeenAt: new Date() },
+        },
+        { upsert: true },
+      );
+      return gridFsId;
+    } catch (err) {
+      logJson("warn", "telegram", "user_photo_sync_failed", {
+        botId,
+        telegramUserId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return existing?.photoFileId ? String(existing.photoFileId) : null;
+    }
   }
 
   static async sendFieldPrompt(

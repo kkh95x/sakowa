@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, type MouseEvent } from "react";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
 import { Download, FileIcon, FileText, ImageIcon, Minus, Plus, X } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -8,7 +8,7 @@ import { detectMediaType, fieldAnswerFileUrls, type FieldAnswer } from "@/lib/or
 import { ar } from "@/i18n/ar";
 import { Button } from "@/components/ui/button";
 
-function downloadUrl(url: string, filename: string) {
+export function downloadUrl(url: string, filename: string) {
   const a = document.createElement("a");
   a.href = url;
   a.download = filename || "download";
@@ -18,7 +18,7 @@ function downloadUrl(url: string, filename: string) {
   a.remove();
 }
 
-function FullscreenViewer({
+export function FullscreenViewer({
   open,
   onOpenChange,
   title,
@@ -286,6 +286,84 @@ export function FieldAnswerMedia({
           objectUrl={objectUrl}
           mediaType={mediaType}
           filename={displayName}
+        />
+      ) : null}
+    </>
+  );
+}
+
+export function CompactFileOpenButton({
+  orderId,
+  fieldName,
+  answer,
+}: {
+  orderId: string;
+  fieldName: string;
+  answer: FieldAnswer;
+}) {
+  const urls = fieldAnswerFileUrls(orderId, fieldName, answer);
+  const [busy, setBusy] = useState(false);
+  const [viewer, setViewer] = useState<{
+    objectUrl: string;
+    mediaType: "image" | "pdf";
+    filename: string;
+  } | null>(null);
+  const filename = answer.filename || answer.text || "file";
+
+  async function openFile(e: MouseEvent) {
+    e.stopPropagation();
+    e.preventDefault();
+    if (!urls.length || busy) return;
+    setBusy(true);
+    let blobUrl: string | null = null;
+    try {
+      let blob: Blob | null = null;
+      for (const url of urls) {
+        const res = await fetch(url, { credentials: "include" });
+        if (!res.ok) continue;
+        const next = await res.blob();
+        if (next.type.includes("json") && next.size < 512) continue;
+        blob = next;
+        break;
+      }
+      if (!blob) return;
+      blobUrl = URL.createObjectURL(blob);
+      const mediaType = detectMediaType(answer, blob.type);
+      if (mediaType === "image" || mediaType === "pdf") {
+        setViewer({ objectUrl: blobUrl, mediaType, filename });
+        blobUrl = null;
+      } else {
+        downloadUrl(blobUrl, filename);
+      }
+    } finally {
+      if (blobUrl) URL.revokeObjectURL(blobUrl);
+      setBusy(false);
+    }
+  }
+
+  return (
+    <>
+      <button
+        type="button"
+        className="shrink-0 rounded-lg bg-[#517da2] px-2 py-0.5 text-[10px] font-medium text-white hover:opacity-90 disabled:opacity-50"
+        onClick={openFile}
+        disabled={busy || urls.length === 0}
+      >
+        {busy ? ar.loading : ar.open}
+      </button>
+      {viewer ? (
+        <FullscreenViewer
+          open
+          onOpenChange={(open) => {
+            if (!open) {
+              URL.revokeObjectURL(viewer.objectUrl);
+              setViewer(null);
+            }
+          }}
+          title={viewer.filename}
+          objectUrl={viewer.objectUrl}
+          mediaType={viewer.mediaType}
+          filename={viewer.filename}
         />
       ) : null}
     </>

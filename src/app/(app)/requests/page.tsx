@@ -180,7 +180,7 @@ export default function RequestsPage() {
         title={editing ? ar.editRequest : ar.addRequestTab}
         description={ar.serviceDialogHint}
         size="xl"
-        bodyClassName="flex min-h-0 flex-col overflow-hidden !p-0"
+        bodyClassName="!p-0"
         footer={
           <>
             <label className="me-auto flex max-w-[min(100%,20rem)] items-start gap-2 text-sm">
@@ -204,8 +204,8 @@ export default function RequestsPage() {
           </>
         }
       >
-        <form id="service-form" onSubmit={save} className="flex h-full min-h-0 flex-col">
-          <div className="max-h-[38%] shrink-0 space-y-3 overflow-y-auto border-b border-border px-5 py-4 sm:px-6">
+        <form id="service-form" onSubmit={save} className="flex flex-col">
+          <div className="space-y-3 border-b border-border px-5 py-4 sm:px-6">
             <div className="grid gap-3 sm:grid-cols-2">
               <div>
                 <Label>{ar.name}</Label>
@@ -261,7 +261,7 @@ export default function RequestsPage() {
             </div>
           </div>
 
-          <div className="min-h-0 flex-1 overflow-hidden p-3 sm:p-4">
+          <div className="p-3 sm:p-4">
             <DynamicFieldsEditor
               fields={form.fields}
               onChange={(fields) => setForm((f) => ({ ...f, fields }))}
