@@ -13,14 +13,21 @@ export async function POST(req: Request) {
     const mime = resolveUploadMime(filename, file.type);
     if (!isAllowedUpload(mime, filename)) throw new Error("INVALID_MIME");
     const isImage = mime.startsWith("image/");
+    const purposeRaw = String(form.get("purpose") ?? "");
+    const purpose =
+      purposeRaw === "ADMIN_ATTACHMENT"
+        ? "ADMIN_ATTACHMENT"
+        : isImage
+          ? "REQUEST_IMAGE"
+          : "ORDER_ATTACHMENT";
     const fileId = await GridFSStorageService.save({
       buffer: buf,
       filename,
       mimeType: mime,
-      ownerType: "request_field",
+      ownerType: purpose === "ADMIN_ATTACHMENT" ? "order" : "request_field",
       ownerId: String(form.get("ownerId") ?? "draft"),
       uploadedBy: user.id,
-      purpose: isImage ? "REQUEST_IMAGE" : "ORDER_ATTACHMENT",
+      purpose,
     });
     return json({ fileId, mimeType: mime, filename });
   } catch (err) {

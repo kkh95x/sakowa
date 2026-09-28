@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { useParams } from "next/navigation";
-import { Ban, MessageCircle, MessageSquare, Paperclip, RefreshCw } from "lucide-react";
+import { Ban, ClipboardList, MessageCircle, MessageSquare, Paperclip, RefreshCw } from "lucide-react";
 import { ar } from "@/i18n/ar";
 import { Button } from "@/components/ui/button";
 import { Dialog } from "@/components/ui/dialog";
@@ -12,8 +12,10 @@ import { formatTime } from "@/lib/utils";
 import { useToast } from "@/components/ui/toast";
 import { FieldAnswerMedia } from "@/components/orders/field-answer-media";
 import { OrderChatDialog } from "@/components/orders/order-chat-dialog";
+import { AdminFieldsDialog } from "@/components/orders/admin-fields-dialog";
 import { parseFieldAnswer } from "@/lib/orders/field-answer";
-import type { OrderStatus, RequestField } from "@/types";
+import { parseAdminFields, formatPaymentDate } from "@/lib/orders/admin-fields";
+import type { OrderAdminFields, OrderStatus, RequestField } from "@/types";
 
 const STATUS_LABEL: Record<string, string> = {
   PENDING: ar.pending,
@@ -39,6 +41,7 @@ export default function OrderDetailsPage() {
   const [data, setData] = useState<Record<string, unknown> | null>(null);
   const [dialog, setDialog] = useState<DialogKind>(null);
   const [chatOpen, setChatOpen] = useState(false);
+  const [adminOpen, setAdminOpen] = useState(false);
   const [message, setMessage] = useState("");
   const [statusFile, setStatusFile] = useState<File | null>(null);
   const [attachFile, setAttachFile] = useState<File | null>(null);
@@ -85,6 +88,7 @@ export default function OrderDetailsPage() {
   }, [order, requestType]);
 
   const nextStatuses = order ? TRANSITIONS[String(order.status)] ?? [] : [];
+  const adminFields = parseAdminFields(order?.adminFields);
 
   function closeDialog() {
     setDialog(null);
@@ -272,6 +276,50 @@ export default function OrderDetailsPage() {
         ) : null}
       </div>
 
+      <div className="rounded-3xl border border-border bg-card p-5 shadow-sm">
+        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+          <h2 className="text-lg font-semibold">{ar.adminFields}</h2>
+          <Button type="button" variant="outline" onClick={() => setAdminOpen(true)}>
+            <ClipboardList className="size-4" />
+            {ar.editAdminFields}
+          </Button>
+        </div>
+        <p className="mb-3 text-xs text-muted-foreground">{ar.adminFieldsHint}</p>
+        <div className="grid gap-3 sm:grid-cols-2">
+          <div className="rounded-2xl bg-muted/40 px-3 py-2 text-sm">
+            <div className="text-xs text-muted-foreground">{ar.shamCashReceiptNumber}</div>
+            <div className="font-medium">{adminFields.shamCashReceiptNumber || "—"}</div>
+          </div>
+          <div className="rounded-2xl bg-muted/40 px-3 py-2 text-sm">
+            <div className="text-xs text-muted-foreground">{ar.invoiceNumber}</div>
+            <div className="font-medium">{adminFields.invoiceNumber || "—"}</div>
+          </div>
+          <div className="rounded-2xl bg-muted/40 px-3 py-2 text-sm">
+            <div className="text-xs text-muted-foreground">{ar.paymentDate}</div>
+            <div className="font-medium">{formatPaymentDate(adminFields.paymentDate) || "—"}</div>
+          </div>
+          <div className="rounded-2xl bg-muted/40 px-3 py-2 text-sm sm:col-span-2">
+            <div className="text-xs text-muted-foreground">{ar.adminNotes}</div>
+            <div className="whitespace-pre-wrap font-medium">{adminFields.adminNotes || "—"}</div>
+          </div>
+          <div className="rounded-2xl bg-muted/40 px-3 py-2 text-sm sm:col-span-2">
+            <div className="text-xs text-muted-foreground">{ar.invoiceFile}</div>
+            {adminFields.invoiceFileId ? (
+              <a
+                className="mt-1 inline-block font-medium text-primary underline"
+                href={`/api/files/${adminFields.invoiceFileId}`}
+                target="_blank"
+                rel="noreferrer"
+              >
+                {adminFields.invoiceFilename || ar.viewAttachedFile}
+              </a>
+            ) : (
+              <div className="font-medium">—</div>
+            )}
+          </div>
+        </div>
+      </div>
+
       <div className="rounded-3xl border border-border bg-card p-4 shadow-sm">
         <div className="mb-3 font-semibold">{ar.timeline}</div>
         <ol className="space-y-2">
@@ -318,6 +366,10 @@ export default function OrderDetailsPage() {
             <Paperclip className="size-4" />
             {ar.attachFile}
           </Button>
+          <Button type="button" variant="outline" onClick={() => setAdminOpen(true)}>
+            <ClipboardList className="size-4" />
+            {ar.editAdminFields}
+          </Button>
           <Button type="button" variant="danger" onClick={() => setDialog("block")}>
             <Ban className="size-4" />
             {ar.block}
@@ -329,6 +381,23 @@ export default function OrderDetailsPage() {
         orderId={typeof id === "string" ? id : Array.isArray(id) ? id[0] : null}
         open={chatOpen}
         onOpenChange={setChatOpen}
+      />
+      <AdminFieldsDialog
+        open={adminOpen}
+        onOpenChange={setAdminOpen}
+        orderId={typeof id === "string" ? id : Array.isArray(id) ? id[0] : null}
+        orderNumber={String(order.orderNumber)}
+        value={adminFields}
+        onSaved={(next: OrderAdminFields) => {
+          setData((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  order: { ...(prev.order as Record<string, unknown>), adminFields: next },
+                }
+              : prev,
+          );
+        }}
       />
 
       <Dialog

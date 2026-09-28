@@ -98,6 +98,15 @@ export interface RequestField {
   attachmentFileId?: string;
 }
 
+export interface OrderAdminFields {
+  shamCashReceiptNumber: string;
+  adminNotes: string;
+  invoiceNumber: string;
+  paymentDate: string;
+  invoiceFileId: string | null;
+  invoiceFilename: string | null;
+}
+
 export interface OrderFilter {
   field: string;
   operator: FilterOperator;

@@ -8,10 +8,12 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { formatTime } from "@/lib/utils";
 import { operatorsForField } from "@/lib/orders/filter-builder";
-import type { FilterOperator, OrderFilter, OrderStatus, RequestField } from "@/types";
+import type { FilterOperator, OrderAdminFields, OrderFilter, OrderStatus, RequestField } from "@/types";
 import { useToast } from "@/components/ui/toast";
 import { fieldAnswerLabel, parseFieldAnswer } from "@/lib/orders/field-answer";
+import { formatPaymentDate, parseAdminFields } from "@/lib/orders/admin-fields";
 import { OrderChatDialog } from "@/components/orders/order-chat-dialog";
+import { AdminFieldsButton, AdminFieldsDialog } from "@/components/orders/admin-fields-dialog";
 
 const STATUSES: OrderStatus[] = ["PENDING", "REVIEWING", "COMPLETED", "REJECTED", "ARCHIVED"];
 
@@ -43,6 +45,7 @@ type OrderRow = {
   status: OrderStatus;
   createdAt: string;
   fields?: Record<string, unknown>;
+  adminFields?: OrderAdminFields | null;
   botId?: string;
   requestTypeId?: string;
 };
@@ -55,6 +58,10 @@ function isTableField(field: RequestField) {
 
 function fieldValue(order: OrderRow, field: RequestField) {
   return fieldAnswerLabel(parseFieldAnswer(order.fields?.[field.name], field.type));
+}
+
+function dash(value: string | null | undefined) {
+  return value?.trim() ? value : "—";
 }
 
 function operatorLabel(op: FilterOperator) {
@@ -87,6 +94,7 @@ export default function RequestOrdersClient() {
   const [draftValue, setDraftValue] = useState("");
   const [draftValueTo, setDraftValueTo] = useState("");
   const [chatOrderId, setChatOrderId] = useState<string | null>(null);
+  const [adminOrder, setAdminOrder] = useState<OrderRow | null>(null);
 
   const columns = useMemo(
     () => (requestType?.fields ?? []).filter(isTableField).sort((a, b) => a.order - b.order),
@@ -356,12 +364,19 @@ export default function RequestOrdersClient() {
                     {col.label}
                   </th>
                 ))}
+                <th className="px-3 py-2 text-start">{ar.shamCashReceiptNumber}</th>
+                <th className="px-3 py-2 text-start">{ar.invoiceNumber}</th>
+                <th className="px-3 py-2 text-start">{ar.paymentDate}</th>
+                <th className="px-3 py-2 text-start">{ar.adminNotes}</th>
+                <th className="px-3 py-2 text-start">{ar.invoiceFile}</th>
                 <th className="px-3 py-2 text-start">{ar.orderTime}</th>
                 <th className="px-3 py-2 text-start">{ar.status}</th>
               </tr>
             </thead>
             <tbody>
-              {orders.map((order) => (
+              {orders.map((order) => {
+                const admin = parseAdminFields(order.adminFields);
+                return (
                 <tr key={order.id} className="border-t border-border hover:bg-muted/30">
                   <td className="px-3 py-2 font-medium">{order.orderNumber}</td>
                   <td className="px-3 py-2">
@@ -381,6 +396,7 @@ export default function RequestOrdersClient() {
                         <MessageCircle className="size-3.5" />
                         {ar.openConversation}
                       </button>
+                      <AdminFieldsButton onClick={() => setAdminOrder(order)} />
                     </div>
                   </td>
                   <td className="px-3 py-2">
@@ -393,10 +409,31 @@ export default function RequestOrdersClient() {
                       {fieldValue(order, col)}
                     </td>
                   ))}
+                  <td className="max-w-[10rem] truncate px-3 py-2">{dash(admin.shamCashReceiptNumber)}</td>
+                  <td className="max-w-[10rem] truncate px-3 py-2">{dash(admin.invoiceNumber)}</td>
+                  <td className="px-3 py-2 whitespace-nowrap">{dash(formatPaymentDate(admin.paymentDate))}</td>
+                  <td className="max-w-[12rem] truncate px-3 py-2" title={admin.adminNotes || undefined}>
+                    {dash(admin.adminNotes)}
+                  </td>
+                  <td className="max-w-[10rem] truncate px-3 py-2">
+                    {admin.invoiceFileId ? (
+                      <a
+                        className="text-primary underline"
+                        href={`/api/files/${admin.invoiceFileId}`}
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        {admin.invoiceFilename || ar.invoiceFile}
+                      </a>
+                    ) : (
+                      "—"
+                    )}
+                  </td>
                   <td className="px-3 py-2 whitespace-nowrap">{formatTime(order.createdAt)}</td>
                   <td className="px-3 py-2">{STATUS_LABEL[order.status]}</td>
                 </tr>
-              ))}
+                );
+              })}
             </tbody>
           </table>
           {!loadingOrders && orders.length === 0 && (
@@ -412,7 +449,9 @@ export default function RequestOrdersClient() {
         </div>
 
         <div className="grid gap-3 md:hidden">
-          {orders.map((order) => (
+          {orders.map((order) => {
+            const admin = parseAdminFields(order.adminFields);
+            return (
             <div key={order.id} className="rounded-2xl border border-border bg-card p-4 text-start">
               <div className="flex items-start justify-between gap-2">
                 <div className="font-semibold">{order.orderNumber}</div>
@@ -428,6 +467,39 @@ export default function RequestOrdersClient() {
                     <span className="truncate font-medium">{fieldValue(order, col)}</span>
                   </div>
                 ))}
+                <div className="flex justify-between gap-3">
+                  <span className="text-muted-foreground">{ar.shamCashReceiptNumber}</span>
+                  <span className="truncate font-medium">{dash(admin.shamCashReceiptNumber)}</span>
+                </div>
+                <div className="flex justify-between gap-3">
+                  <span className="text-muted-foreground">{ar.invoiceNumber}</span>
+                  <span className="truncate font-medium">{dash(admin.invoiceNumber)}</span>
+                </div>
+                <div className="flex justify-between gap-3">
+                  <span className="text-muted-foreground">{ar.paymentDate}</span>
+                  <span className="truncate font-medium">{dash(formatPaymentDate(admin.paymentDate))}</span>
+                </div>
+                <div className="flex justify-between gap-3">
+                  <span className="text-muted-foreground">{ar.adminNotes}</span>
+                  <span className="truncate font-medium">{dash(admin.adminNotes)}</span>
+                </div>
+                <div className="flex justify-between gap-3">
+                  <span className="text-muted-foreground">{ar.invoiceFile}</span>
+                  <span className="truncate font-medium">
+                    {admin.invoiceFileId ? (
+                      <a
+                        className="text-primary underline"
+                        href={`/api/files/${admin.invoiceFileId}`}
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        {admin.invoiceFilename || ar.invoiceFile}
+                      </a>
+                    ) : (
+                      "—"
+                    )}
+                  </span>
+                </div>
               </div>
               <div className="mt-2 text-xs text-muted-foreground">{formatTime(order.createdAt)}</div>
               <div className="mt-3 flex flex-nowrap items-center gap-2">
@@ -446,9 +518,11 @@ export default function RequestOrdersClient() {
                   <MessageCircle className="size-3.5" />
                   {ar.openConversation}
                 </button>
+                <AdminFieldsButton onClick={() => setAdminOrder(order)} />
               </div>
             </div>
-          ))}
+            );
+          })}
           {!loadingOrders && orders.length === 0 && (
             <div className="rounded-2xl border border-border bg-card p-6 text-center">
               <div className="font-medium">
@@ -502,6 +576,21 @@ export default function RequestOrdersClient() {
           if (!next) setChatOrderId(null);
         }}
         onOrderIdChange={setChatOrderId}
+      />
+      <AdminFieldsDialog
+        open={Boolean(adminOrder)}
+        onOpenChange={(open) => {
+          if (!open) setAdminOrder(null);
+        }}
+        orderId={adminOrder?.id ?? null}
+        orderNumber={adminOrder?.orderNumber}
+        value={adminOrder?.adminFields}
+        onSaved={(next) => {
+          const id = adminOrder?.id;
+          if (!id) return;
+          setOrders((prev) => prev.map((row) => (row.id === id ? { ...row, adminFields: next } : row)));
+          setAdminOrder((prev) => (prev ? { ...prev, adminFields: next } : prev));
+        }}
       />
     </div>
   );

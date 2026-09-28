@@ -10,9 +10,68 @@ import { persistValue, validateFieldValue } from "@/lib/telegram/validate-field"
 import { displayChoice, optionLabel } from "@/lib/orders/field-answer";
 import { callbackButtonLabel, isSlashCommand } from "@/lib/chat/callback-label";
 import { ensureUniqueFieldNames } from "@/lib/requests/field-names";
+import {
+  clampMyOrdersPage,
+  formatOrderCommandLine,
+  MY_ORDERS_PAGE_SIZE,
+  myOrdersNavButtons,
+  orderDigitsFromCommand,
+  orderNumberLookup,
+  orderStatusLabel,
+} from "@/lib/telegram/order-command";
 import { logJson } from "@/lib/log";
 import { correlationId } from "@/lib/security/crypto";
 import type { ConversationState, RequestField } from "@/types";
+
+type ChatMedia = {
+  label: string;
+  telegramFileId?: string | null;
+  kind: "photo" | "document";
+  gridFsId?: string | null;
+};
+
+async function sendChatMedia(botId: string, chatId: number, media: ChatMedia) {
+  try {
+    if (media.gridFsId) {
+      const file = await GridFSStorageService.readBuffer(media.gridFsId);
+      if (file?.buffer?.length) {
+        if (file.mimeType.startsWith("image/") || media.kind === "photo") {
+          await TelegramService.sendPhoto(botId, chatId, file.buffer, file.filename, media.label);
+        } else {
+          await TelegramService.sendDocument(botId, chatId, file.buffer, file.filename, media.label);
+        }
+        return;
+      }
+    }
+    if (!media.telegramFileId) throw new Error("NO_FILE_SOURCE");
+    if (media.kind === "photo") {
+      await TelegramService.sendExistingPhoto(botId, chatId, media.telegramFileId, media.label);
+    } else {
+      await TelegramService.sendExistingDocument(botId, chatId, media.telegramFileId, media.label);
+    }
+  } catch (err) {
+    logJson("error", "telegram", "order_media_send_failed", {
+      botId,
+      label: media.label,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    try {
+      if (media.telegramFileId) {
+        if (media.kind === "photo") {
+          await TelegramService.sendExistingDocument(botId, chatId, media.telegramFileId, media.label);
+        } else {
+          await TelegramService.sendExistingPhoto(botId, chatId, media.telegramFileId, media.label);
+        }
+      }
+    } catch (fallbackErr) {
+      logJson("error", "telegram", "order_media_send_fallback_failed", {
+        botId,
+        label: media.label,
+        error: fallbackErr instanceof Error ? fallbackErr.message : String(fallbackErr),
+      });
+    }
+  }
+}
 
 type From = {
   id: number;
@@ -298,6 +357,11 @@ export class TelegramConversationService {
       await this.sendMyOrders(botId, from.id, chatId);
       return;
     }
+    const orderDigits = orderDigitsFromCommand(command);
+    if (orderDigits != null) {
+      await this.sendOrderDetails(botId, from.id, chatId, orderDigits);
+      return;
+    }
     if (command.startsWith("/s_")) {
       const requestTypeId = command.slice(3);
       if (ObjectId.isValid(requestTypeId)) {
@@ -368,6 +432,16 @@ export class TelegramConversationService {
     if (data === "menu:my") {
       await revealChoice(botId, from, chatId, source, buttonLabel(data, source, "📋 طلباتي"));
       await this.sendMyOrders(botId, from.id, chatId);
+      return;
+    }
+    if (data.startsWith("ords:")) {
+      const page = Number(data.slice(5));
+      await this.sendMyOrders(botId, from.id, chatId, page, source);
+      return;
+    }
+    if (data.startsWith("ord:")) {
+      const orderId = data.slice(4);
+      await this.sendOrderDetails(botId, from.id, chatId, orderId);
       return;
     }
     if (data === "menu:requests") {
@@ -446,30 +520,154 @@ export class TelegramConversationService {
     }
   }
 
-  static async sendMyOrders(botId: string, telegramUserId: number, chatId: number) {
+  static async sendMyOrders(
+    botId: string,
+    telegramUserId: number,
+    chatId: number,
+    page = 0,
+    source?: CallbackMessage,
+  ) {
     const db = await getDb();
-    const orders = await db
-      .collection(collections.orders)
-      .find({ botId, telegramUserId })
-      .sort({ createdAt: -1 })
-      .limit(10)
-      .toArray();
-    if (!orders.length) {
+    const query = {
+      ...OrderService.userMatch(telegramUserId, { botId }),
+      status: { $ne: "ARCHIVED" },
+    };
+    const total = await db.collection(collections.orders).countDocuments(query);
+    if (!total) {
       await TelegramService.sendMessage(botId, chatId, "لا توجد طلبات سابقة.");
       return;
     }
-    const labels: Record<string, string> = {
-      PENDING: "قيد الانتظار",
-      REVIEWING: "قيد المراجعة",
-      COMPLETED: "منجزة",
-      REJECTED: "مرفوضة",
-      ARCHIVED: "مؤرشفة",
-    };
-    await TelegramService.sendMessage(
-      botId,
-      chatId,
-      `📋 طلباتي\n\n${orders.map((o) => `#${o.orderNumber} — ${labels[String(o.status)] ?? o.status}`).join("\n")}`,
-    );
+    const safePage = clampMyOrdersPage(page, total);
+    const orders = await db
+      .collection(collections.orders)
+      .find(query)
+      .sort({ createdAt: -1 })
+      .skip(safePage * MY_ORDERS_PAGE_SIZE)
+      .limit(MY_ORDERS_PAGE_SIZE)
+      .toArray();
+    const typeIds = [
+      ...new Set(
+        orders
+          .map((o) => String(o.requestTypeId ?? ""))
+          .filter((id) => ObjectId.isValid(id) && String(new ObjectId(id)) === id),
+      ),
+    ];
+    const types = typeIds.length
+      ? await db
+          .collection(collections.requestTypes)
+          .find({ _id: { $in: typeIds.map((id) => new ObjectId(id)) } })
+          .project({ name: 1 })
+          .toArray()
+      : [];
+    const typeNames = new Map(types.map((t) => [String(t._id), String(t.name ?? "").trim()]));
+    const rows = orders.map((o) => [
+      {
+        text: formatOrderCommandLine(
+          o.orderNumber,
+          o.status,
+          typeNames.get(String(o.requestTypeId)),
+        ),
+        callback_data: `ord:${String(o._id)}`,
+      },
+    ]);
+    const nav = myOrdersNavButtons(safePage, total);
+    if (nav.length) rows.push(nav);
+    const extra = kb(rows);
+    if (source?.message_id) {
+      try {
+        const edited = await TelegramService.editReplyMarkup(botId, chatId, source.message_id, extra);
+        if (edited?.ok || /not modified/i.test(String(edited?.description ?? ""))) return;
+      } catch {
+        /* send a fresh list */
+      }
+    }
+    await TelegramService.sendMessage(botId, chatId, "📋 طلباتي", extra);
+  }
+
+  static async sendOrderDetails(
+    botId: string,
+    telegramUserId: number,
+    chatId: number,
+    ref: number | string,
+  ) {
+    const db = await getDb();
+    const owner = OrderService.userMatch(telegramUserId, { botId });
+    const query: Record<string, unknown> = { ...owner, status: { $ne: "ARCHIVED" } };
+    if (typeof ref === "number") {
+      query.orderNumber = orderNumberLookup(ref);
+    } else if (ObjectId.isValid(ref) && String(new ObjectId(ref)) === ref) {
+      query._id = new ObjectId(ref);
+    } else {
+      const digits = Number(String(ref).replace(/\D/g, ""));
+      if (!Number.isFinite(digits) || digits <= 0) {
+        await TelegramService.sendMessage(botId, chatId, "لم يتم العثور على هذا الطلب.");
+        return;
+      }
+      query.orderNumber = orderNumberLookup(digits);
+    }
+    const order = await db.collection(collections.orders).findOne(query);
+    if (!order) {
+      await TelegramService.sendMessage(botId, chatId, "لم يتم العثور على هذا الطلب.");
+      return;
+    }
+
+    const request = order.requestTypeId
+      ? await db.collection(collections.requestTypes).findOne({
+          _id: new ObjectId(String(order.requestTypeId)),
+        })
+      : null;
+    const fields = (request?.fields as RequestField[]) ?? [];
+    const sanitized = OrderService.sanitizeOrder(order as Record<string, unknown>, fields);
+    const rows = OrderService.summarizeFields(sanitized, fields);
+
+    const createdAt = order.createdAt ? new Date(String(order.createdAt)) : null;
+    const createdLabel =
+      createdAt && !Number.isNaN(createdAt.getTime())
+        ? createdAt.toLocaleString("ar-SY", { dateStyle: "short", timeStyle: "short" })
+        : "";
+
+    const lines = [
+      "📋 تفاصيل الطلب",
+      `رقم الطلب: #${order.orderNumber}`,
+      `الحالة: ${orderStatusLabel(order.status)}`,
+    ];
+    if (request?.name) lines.push(`الخدمة: ${request.name}`);
+    if (createdLabel) lines.push(`التاريخ: ${createdLabel}`);
+    lines.push("");
+
+    const media: ChatMedia[] = [];
+    const sentGridFs = new Set<string>();
+    for (const row of rows) {
+      if (row.kind === "file" || row.kind === "image") {
+        lines.push(`${row.label}: ${row.kind === "image" ? "📷 صورة مرفقة" : "📎 ملف مرفق"}`);
+        media.push({
+          label: row.label,
+          telegramFileId: row.telegramFileId,
+          kind: row.kind === "image" ? "photo" : "document",
+          gridFsId: row.gridFsId,
+        });
+        if (row.gridFsId) sentGridFs.add(row.gridFsId);
+      } else {
+        lines.push(`${row.label}: ${row.value || "—"}`);
+      }
+    }
+
+    for (const id of (order.attachments as string[]) ?? []) {
+      const gridFsId = String(id);
+      if (!gridFsId || sentGridFs.has(gridFsId)) continue;
+      sentGridFs.add(gridFsId);
+      media.push({
+        label: "مرفق",
+        telegramFileId: null,
+        kind: "document",
+        gridFsId,
+      });
+    }
+
+    await TelegramService.sendMessage(botId, chatId, lines.join("\n").trim());
+    for (const item of media) {
+      await sendChatMedia(botId, chatId, item);
+    }
   }
 
   static async draftFieldsForSubmit(botId: string, telegramUserId: number, requestTypeId: string) {
@@ -568,8 +766,7 @@ export class TelegramConversationService {
     const fields = activeFields((request?.fields as RequestField[]) ?? []);
     const draft = (state.draft as Record<string, unknown>) ?? {};
     const lines: string[] = [];
-    const mediaPreview: { label: string; telegramFileId: string; kind: "photo" | "document"; gridFsId?: string }[] =
-      [];
+    const mediaPreview: ChatMedia[] = [];
     if (request?.name) lines.push(`الخدمة: ${request.name}`);
 
     for (const f of fields) {
@@ -606,57 +803,7 @@ export class TelegramConversationService {
     await patch(botId, telegramUserId, { state: "REVIEW" });
 
     for (const media of mediaPreview) {
-      try {
-        if (media.gridFsId) {
-          const file = await GridFSStorageService.readBuffer(media.gridFsId);
-          if (file?.buffer?.length) {
-            logJson("info", "telegram", "review_media_sending", {
-              botId,
-              label: media.label,
-              via: "gridfs",
-              bytes: file.buffer.length,
-              mimeType: file.mimeType,
-            });
-            if (file.mimeType.startsWith("image/") || media.kind === "photo") {
-              await TelegramService.sendPhoto(botId, chatId, file.buffer, file.filename, media.label);
-            } else {
-              await TelegramService.sendDocument(botId, chatId, file.buffer, file.filename, media.label);
-            }
-            continue;
-          }
-        }
-        if (!media.telegramFileId) {
-          throw new Error("NO_FILE_SOURCE");
-        }
-        logJson("info", "telegram", "review_media_sending", {
-          botId,
-          label: media.label,
-          via: "telegram_file_id",
-        });
-        if (media.kind === "photo") {
-          await TelegramService.sendExistingPhoto(botId, chatId, media.telegramFileId, media.label);
-        } else {
-          await TelegramService.sendExistingDocument(botId, chatId, media.telegramFileId, media.label);
-        }
-      } catch (err) {
-        logJson("error", "telegram", "review_media_preview_failed", {
-          botId,
-          label: media.label,
-          error: err instanceof Error ? err.message : String(err),
-        });
-        console.error("REVIEW_MEDIA_PREVIEW_FAILED", { botId, label: media.label, error: err });
-        try {
-          if (media.telegramFileId) {
-            if (media.kind === "photo") {
-              await TelegramService.sendExistingDocument(botId, chatId, media.telegramFileId, media.label);
-            } else {
-              await TelegramService.sendExistingPhoto(botId, chatId, media.telegramFileId, media.label);
-            }
-          }
-        } catch (fallbackErr) {
-          console.error("REVIEW_MEDIA_PREVIEW_FALLBACK_FAILED", fallbackErr);
-        }
-      }
+      await sendChatMedia(botId, chatId, media);
     }
 
     await TelegramService.sendMessage(

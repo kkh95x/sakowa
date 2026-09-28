@@ -11,7 +11,8 @@ import { persistOrderFieldFiles } from "@/lib/orders/persist-order-files";
 import { ensureUniqueFieldNames } from "@/lib/requests/field-names";
 import { ChatLogService } from "@/lib/chat/chat-log-service";
 import { fieldAnswerLabel, parseFieldAnswer, displayChoice } from "@/lib/orders/field-answer";
-import type { OrderFilter, OrderStatus, RequestField } from "@/types";
+import { emptyAdminFields, parseAdminFields } from "@/lib/orders/admin-fields";
+import type { OrderAdminFields, OrderFilter, OrderStatus, RequestField } from "@/types";
 
 function peerKeys(value: unknown) {
   if (value == null || value === "") return [];
@@ -319,6 +320,7 @@ export class OrderService {
       }
     }
     cloned.fields = fieldValues;
+    cloned.adminFields = parseAdminFields(order.adminFields);
     return cloned;
   }
 
@@ -371,6 +373,7 @@ export class OrderService {
           status: "PENDING",
           fields: persisted.fields,
           attachments: attachmentIds,
+          adminFields: emptyAdminFields(),
           createdAt: now,
           updatedAt: now,
           submittedAt: now,
@@ -650,5 +653,72 @@ export class OrderService {
         // ignore telegram failures
       }
     }
+  }
+
+  static async updateAdminFields(params: {
+    orderId: string;
+    actorId: string;
+    shamCashReceiptNumber?: string;
+    adminNotes?: string;
+    invoiceNumber?: string;
+    paymentDate?: string;
+    invoiceFileId?: string | null;
+    invoiceFilename?: string | null;
+    clearInvoice?: boolean;
+  }) {
+    const db = await getDb();
+    const order = await this.get(params.orderId);
+    if (!order) throw new Error("NOT_FOUND");
+    const before = parseAdminFields(order.adminFields);
+    const next: OrderAdminFields = {
+      shamCashReceiptNumber:
+        params.shamCashReceiptNumber !== undefined
+          ? parseAdminFields({ shamCashReceiptNumber: params.shamCashReceiptNumber }).shamCashReceiptNumber
+          : before.shamCashReceiptNumber,
+      adminNotes:
+        params.adminNotes !== undefined
+          ? parseAdminFields({ adminNotes: params.adminNotes }).adminNotes
+          : before.adminNotes,
+      invoiceNumber:
+        params.invoiceNumber !== undefined
+          ? parseAdminFields({ invoiceNumber: params.invoiceNumber }).invoiceNumber
+          : before.invoiceNumber,
+      paymentDate:
+        params.paymentDate !== undefined
+          ? parseAdminFields({ paymentDate: params.paymentDate }).paymentDate
+          : before.paymentDate,
+      invoiceFileId: before.invoiceFileId,
+      invoiceFilename: before.invoiceFilename,
+    };
+    if (params.clearInvoice) {
+      next.invoiceFileId = null;
+      next.invoiceFilename = null;
+    } else if (params.invoiceFileId !== undefined) {
+      next.invoiceFileId = params.invoiceFileId ? String(params.invoiceFileId) : null;
+      next.invoiceFilename = next.invoiceFileId
+        ? String(params.invoiceFilename ?? before.invoiceFilename ?? "").trim() || null
+        : null;
+    }
+    const now = new Date();
+    await db.collection(collections.orders).updateOne(
+      { _id: new ObjectId(params.orderId) },
+      {
+        $set: {
+          adminFields: next,
+          updatedAt: now,
+          lastUpdatedBy: params.actorId,
+        },
+      },
+    );
+    await audit({
+      actorUserId: params.actorId,
+      category: "ORDERS",
+      action: "ORDER_ADMIN_FIELDS_UPDATED",
+      entityId: params.orderId,
+      entityType: "order",
+      before,
+      after: next,
+    });
+    return next;
   }
 }

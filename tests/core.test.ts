@@ -5,9 +5,19 @@ import { parseFieldAnswer, displayChoice } from "../src/lib/orders/field-answer"
 import { resolveUploadMime, isAllowedUpload } from "../src/lib/storage/mime";
 import { normalizeTelegramFilePath, pinnedTelegramIp } from "../src/lib/telegram/api";
 import { duplicateFieldNames, ensureUniqueFieldNames, nextFieldName } from "../src/lib/requests/field-names";
+import { parseAdminFields, hasAdminFields } from "../src/lib/orders/admin-fields";
 import { callbackButtonLabel, isSlashCommand } from "../src/lib/chat/callback-label";
 import { ChatLogService, chatTextFingerprint } from "../src/lib/chat/chat-log-service";
 import { sanitizeAuditValue, toAuditSnapshot } from "../src/lib/audit/audit";
+import {
+  clampMyOrdersPage,
+  formatOrderCommandLine,
+  MY_ORDERS_PAGE_SIZE,
+  myOrdersNavButtons,
+  orderDigitsFromCommand,
+  orderNumberLookup,
+  orderSlashCommand,
+} from "../src/lib/telegram/order-command";
 
 describe("OrderFilterBuilder", () => {
   it("builds safe equality filters", () => {
@@ -227,5 +237,61 @@ describe("sanitizeAuditValue", () => {
   it("wraps non-object snapshots", () => {
     expect(toAuditSnapshot("hello")).toEqual({ value: "hello" });
     expect(toAuditSnapshot(null)).toBeUndefined();
+  });
+});
+
+describe("order telegram commands", () => {
+  it("builds a clickable slash command from the order number and status", () => {
+    expect(orderSlashCommand("ORD-00012")).toBe("o_00012");
+    expect(formatOrderCommandLine("ORD-00012", "PENDING")).toBe("\u2066ORD-00012\u2069 - قيد الانتظار");
+    expect(formatOrderCommandLine("ORD-00012", "COMPLETED", "تجديد جواز")).toBe(
+      "\u2066ORD-00012\u2069 - تجديد جواز - منجزة",
+    );
+  });
+
+  it("parses /o_ commands including bot mentions", () => {
+    expect(orderDigitsFromCommand("/o_00012")).toBe(12);
+    expect(orderDigitsFromCommand("/o_00012@MyBot")).toBe(12);
+    expect(orderDigitsFromCommand("/orders")).toBeNull();
+    expect(orderNumberLookup(12)).toEqual({ $regex: "^ORD-0*12$" });
+  });
+
+  it("paginates my-orders at 5 per page with next/previous", () => {
+    expect(MY_ORDERS_PAGE_SIZE).toBe(5);
+    expect(clampMyOrdersPage(0, 12)).toBe(0);
+    expect(clampMyOrdersPage(2, 12)).toBe(2);
+    expect(clampMyOrdersPage(9, 12)).toBe(2);
+    expect(myOrdersNavButtons(0, 12)).toEqual([{ text: "التالي", callback_data: "ords:1" }]);
+    expect(myOrdersNavButtons(1, 12)).toEqual([
+      { text: "السابق", callback_data: "ords:0" },
+      { text: "التالي", callback_data: "ords:2" },
+    ]);
+    expect(myOrdersNavButtons(2, 12)).toEqual([{ text: "السابق", callback_data: "ords:1" }]);
+    expect(myOrdersNavButtons(0, 5)).toEqual([]);
+  });
+});
+
+describe("order admin fields", () => {
+  it("parses empty and filled admin-only fields", () => {
+    expect(parseAdminFields(undefined)).toEqual({
+      shamCashReceiptNumber: "",
+      adminNotes: "",
+      invoiceNumber: "",
+      paymentDate: "",
+      invoiceFileId: null,
+      invoiceFilename: null,
+    });
+    const filled = parseAdminFields({
+      shamCashReceiptNumber: "  12345  ",
+      adminNotes: "ملاحظة",
+      invoiceNumber: "INV-9",
+      paymentDate: "2026-08-31",
+      invoiceFileId: "file1",
+      invoiceFilename: "invoice.pdf",
+    });
+    expect(filled.shamCashReceiptNumber).toBe("12345");
+    expect(filled.paymentDate).toBe("2026-08-31");
+    expect(hasAdminFields(filled)).toBe(true);
+    expect(hasAdminFields(parseAdminFields({}))).toBe(false);
   });
 });
