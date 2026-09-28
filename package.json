@@ -1,5 +1,5 @@
 {
-  "name": "bothub",
+  "name": "shakowa",
   "version": "1.0.0",
   "private": true,
   "scripts": {
@@ -12,7 +12,7 @@
     "test:watch": "vitest",
     "seed": "tsx scripts/seed.ts",
     "indexes": "tsx scripts/ensure-indexes.ts",
-    "docker:build": "docker build -t bothub:latest -t ghcr.io/kkh95x/bothub:latest .",
+    "docker:build": "docker build -t shakowa:latest -t ghcr.io/kkh95x/shakowa:latest .",
     "docker:up": "docker compose up -d",
     "docker:down": "docker compose down",
     "docker:prod:up": "docker compose -f docker-compose.prod.yml --env-file .env up -d",

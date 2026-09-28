@@ -1,6 +1,6 @@
 services:
   app:
-    image: ${BOTHUB_IMAGE:-ghcr.io/kkh95x/bothub:latest}
+    image: ${BOTHUB_IMAGE:-ghcr.io/kkh95x/shakowa:latest}
     build:
       context: .
       dockerfile: Dockerfile

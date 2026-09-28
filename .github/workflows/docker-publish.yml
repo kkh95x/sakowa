@@ -14,7 +14,7 @@ permissions:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: bothub
+  IMAGE_NAME: shakowa
 
 jobs:
   build-and-push:

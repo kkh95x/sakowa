@@ -1,5 +1,5 @@
 export const ar = {
-  brand: "BotHub",
+  brand: "Shakowa",
   tagline: "منصة إدارة طلبات تيليجرام",
   login: "تسجيل الدخول",
   logout: "تسجيل الخروج",

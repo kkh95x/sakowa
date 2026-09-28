@@ -3,7 +3,7 @@ import "./globals.css";
 import { Providers } from "@/components/providers";
 
 export const metadata: Metadata = {
-  title: "BotHub",
+  title: "Shakowa",
   description: "منصة إدارة طلبات تيليجرام",
 };
 
