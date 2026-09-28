@@ -6,7 +6,16 @@ import type { OrderStatus, RequestField } from "@/types";
 
 type Ctx = { params: Promise<{ id: string }> };
 
-const STATUSES: OrderStatus[] = ["PENDING", "REVIEWING", "COMPLETED", "REJECTED", "ARCHIVED"];
+const STATUSES: OrderStatus[] = [
+  "PENDING",
+  "REVIEWING",
+  "IN_PROGRESS",
+  "RESOLVED",
+  "REJECTED",
+  "CLOSED",
+  "COMPLETED",
+  "ARCHIVED",
+];
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -67,7 +76,7 @@ export async function GET(req: Request, ctx: Ctx) {
         createdAt: row.createdAt instanceof Date ? row.createdAt.toISOString() : String(row.createdAt ?? ""),
         requestTypeId: String(row.requestTypeId ?? ""),
         requestTypeName: String(rt?.name ?? services.find((s) => s.id === String(row.requestTypeId))?.name ?? ""),
-        summary: OrderService.summarizeFields(sanitized, fields),
+        summary: OrderService.summarizeSubmittedAnswers(sanitized, fields),
       };
     });
 

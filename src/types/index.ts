@@ -5,9 +5,14 @@ export type UserStatus = "ACTIVE" | "DISABLED" | "BLOCKED";
 export type OrderStatus =
   | "PENDING"
   | "REVIEWING"
-  | "COMPLETED"
+  | "IN_PROGRESS"
+  | "RESOLVED"
   | "REJECTED"
+  | "CLOSED"
+  | "COMPLETED"
   | "ARCHIVED";
+
+export type ComplaintStatus = Exclude<OrderStatus, "COMPLETED" | "ARCHIVED"> | "IN_PROGRESS" | "RESOLVED" | "CLOSED";
 
 export type BotStatus = "STOPPED" | "RUNNING" | "ERROR";
 
@@ -27,7 +32,8 @@ export type FieldType =
   | "FILE"
   | "IMAGE"
   | "INSTRUCTION"
-  | "CONFIRMATION";
+  | "CONFIRMATION"
+  | "DYNAMIC";
 
 export type ConversationState =
   | "IDLE"
@@ -40,6 +46,13 @@ export type ConversationState =
   | "CANCELLED";
 
 export type NotificationType =
+  | "NEW_COMPLAINT"
+  | "COMPLAINT_STATUS_CHANGED"
+  | "NEW_COMPLAINT_MESSAGE"
+  | "NEW_COMPLAINT_ATTACHMENT"
+  | "COMPLAINT_ASSIGNED"
+  | "SECURITY_EVENT"
+  | "SYSTEM_EVENT"
   | "NEW_ORDER"
   | "ORDER_STATUS_CHANGED"
   | "ORDER_MESSAGE"
@@ -84,6 +97,7 @@ export interface RequestField {
   placeholder?: string;
   description?: string;
   telegramMessage?: string;
+  telegramPrompt?: TelegramPrompt;
   required: boolean;
   sensitive: boolean;
   validation?: {
@@ -98,13 +112,56 @@ export interface RequestField {
   attachmentFileId?: string;
 }
 
+/**
+ * Content the bot sends to ask a field's question (not the user's answer).
+ * New block kinds (voice, audio, video, location, buttons, media_group) are added
+ * as new union members plus a renderer step; existing blocks stay untouched.
+ */
+export type TelegramPromptBlockType = "text" | "image" | "document";
+
+export interface TelegramPromptTextBlock {
+  id: string;
+  type: "text";
+  text: string;
+}
+
+export interface TelegramPromptMediaBlock<T extends "image" | "document"> {
+  id: string;
+  type: T;
+  storageId: string;
+  fileName?: string;
+  mimeType?: string;
+  size?: number;
+}
+
+export type TelegramPromptImageBlock = TelegramPromptMediaBlock<"image">;
+export type TelegramPromptDocumentBlock = TelegramPromptMediaBlock<"document">;
+
+export type TelegramPromptBlock =
+  | TelegramPromptTextBlock
+  | TelegramPromptImageBlock
+  | TelegramPromptDocumentBlock;
+
+export interface TelegramPrompt {
+  blocks: TelegramPromptBlock[];
+}
+
+export type BranchOperator = "equals" | "not_equals" | "contains" | "is_empty" | "is_not_empty";
+export type BranchAction = "show" | "hide" | "goto";
+
+export interface BranchingRule {
+  id: string;
+  sourceFieldId: string;
+  operator: BranchOperator;
+  value?: string;
+  action: BranchAction;
+  targetFieldId: string;
+}
+
 export interface OrderAdminFields {
-  shamCashReceiptNumber: string;
   adminNotes: string;
-  invoiceNumber: string;
-  paymentDate: string;
-  invoiceFileId: string | null;
-  invoiceFilename: string | null;
+  attachmentFileId: string | null;
+  attachmentFilename: string | null;
 }
 
 export interface OrderFilter {

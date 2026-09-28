@@ -5,28 +5,25 @@ import { AnimatePresence, motion } from "framer-motion";
 import { Check, CheckCheck, ChevronDown, ChevronUp, ClipboardList, Copy, Paperclip, Pencil, RefreshCw, Send, Trash2, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Dialog } from "@/components/ui/dialog";
-import { Label } from "@/components/ui/label";
 import { CompactFileOpenButton } from "@/components/orders/field-answer-media";
+import { StatusChangeDialog } from "@/components/orders/status-change-dialog";
 import { ar } from "@/i18n/ar";
 import { cn, formatTime, relativeTime } from "@/lib/utils";
 import { useToast } from "@/components/ui/toast";
+import { emptyStatusCounts } from "@/lib/orders/complaint-status";
 import type { OrderStatus } from "@/types";
 
 const PAGE_SIZE = 25;
-const STATUSES: OrderStatus[] = ["PENDING", "REVIEWING", "COMPLETED", "REJECTED", "ARCHIVED"];
-const STATUS_LABEL: Record<OrderStatus, string> = {
+const STATUSES: OrderStatus[] = ["PENDING", "REVIEWING", "IN_PROGRESS", "RESOLVED", "REJECTED", "CLOSED"];
+const STATUS_LABEL: Record<string, string> = {
   PENDING: ar.pending,
   REVIEWING: ar.reviewing,
-  COMPLETED: ar.completed,
+  IN_PROGRESS: ar.inProgress,
+  RESOLVED: ar.resolved,
+  COMPLETED: ar.resolved,
   REJECTED: ar.rejected,
-  ARCHIVED: ar.archived,
-};
-const TRANSITIONS: Record<OrderStatus, OrderStatus[]> = {
-  PENDING: ["REVIEWING", "REJECTED", "ARCHIVED"],
-  REVIEWING: ["COMPLETED", "REJECTED", "ARCHIVED"],
-  COMPLETED: ["ARCHIVED"],
-  REJECTED: ["ARCHIVED"],
-  ARCHIVED: [],
+  CLOSED: ar.closed,
+  ARCHIVED: ar.closed,
 };
 
 type ChatPeer = {
@@ -611,6 +608,9 @@ function ChatBubble({
             </div>
           ) : null}
           <div className="mt-0.5 flex items-center justify-end gap-1 text-[10px] text-black/45">
+            <span className={cn("me-auto font-medium", outgoing ? "text-[#2e6b2e]" : "text-[#3f6a8f]")}>
+              {outgoing ? ar.senderAdmin : ar.senderUser}
+            </span>
             {msg.editedAt ? <span>{ar.messageEditedMark}</span> : null}
             <span>{chatClock(msg.createdAt)}</span>
             {outgoing ? <CheckCheck className="size-3.5 text-[#4fc3f7]" /> : null}
@@ -681,18 +681,9 @@ export function OrderChatDialog({
   const [serviceId, setServiceId] = useState("all");
   const [userOrders, setUserOrders] = useState<UserOrderCard[]>([]);
   const [userServices, setUserServices] = useState<UserServiceTab[]>([]);
-  const [orderCounts, setOrderCounts] = useState<Record<OrderStatus, number>>({
-    PENDING: 0,
-    REVIEWING: 0,
-    COMPLETED: 0,
-    REJECTED: 0,
-    ARCHIVED: 0,
-  });
+  const [orderCounts, setOrderCounts] = useState<Record<string, number>>(emptyStatusCounts());
   const [ordersLoading, setOrdersLoading] = useState(false);
   const [statusTarget, setStatusTarget] = useState<UserOrderCard | null>(null);
-  const [statusMessage, setStatusMessage] = useState("");
-  const [statusFile, setStatusFile] = useState<File | null>(null);
-  const [statusBusy, setStatusBusy] = useState<string | null>(null);
   const [editing, setEditing] = useState<ChatMsg | null>(null);
   const [menu, setMenu] = useState<{ id: string; left: number; top: number } | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<ChatMsg | null>(null);
@@ -716,9 +707,6 @@ export function OrderChatDialog({
       setPanelOpen(false);
       setHasOlder(false);
       setStatusTarget(null);
-      setStatusMessage("");
-      setStatusFile(null);
-      setStatusBusy(null);
       setEditing(null);
       setMenu(null);
       setDeleteTarget(null);
@@ -753,11 +741,13 @@ export function OrderChatDialog({
       if (!res.ok) return;
       const data = await res.json();
       setOrderCounts({
+        ...emptyStatusCounts(),
         PENDING: Number(data.counts?.PENDING ?? 0),
         REVIEWING: Number(data.counts?.REVIEWING ?? 0),
-        COMPLETED: Number(data.counts?.COMPLETED ?? 0),
+        IN_PROGRESS: Number(data.counts?.IN_PROGRESS ?? 0),
+        RESOLVED: Number(data.counts?.RESOLVED ?? data.counts?.COMPLETED ?? 0),
         REJECTED: Number(data.counts?.REJECTED ?? 0),
-        ARCHIVED: Number(data.counts?.ARCHIVED ?? 0),
+        CLOSED: Number(data.counts?.CLOSED ?? data.counts?.ARCHIVED ?? 0),
       });
       setUserServices(Array.isArray(data.services) ? data.services : []);
       setUserOrders(Array.isArray(data.items) ? data.items : []);
@@ -1005,49 +995,9 @@ export function OrderChatDialog({
     }
   }
 
-  function closeStatusDialog() {
-    setStatusTarget(null);
-    setStatusMessage("");
-    setStatusFile(null);
-    setStatusBusy(null);
-  }
-
-  async function changeOrderStatus(next: OrderStatus) {
-    if (!statusTarget) return;
-    setStatusBusy(next);
-    try {
-      let attachmentFileId: string | undefined;
-      if (statusFile) {
-        const fd = new FormData();
-        fd.append("file", statusFile);
-        fd.append("ownerId", statusTarget.id);
-        const up = await fetch("/api/uploads", { method: "POST", body: fd });
-        if (!up.ok) {
-          toast(ar.updateFailed);
-          return;
-        }
-        attachmentFileId = String((await up.json()).fileId);
-      }
-      const res = await fetch(`/api/orders/${statusTarget.id}/status`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          status: next,
-          message: statusMessage.trim() || undefined,
-          attachmentFileId,
-        }),
-      });
-      if (!res.ok) {
-        toast(ar.updateFailed);
-        return;
-      }
-      toast(ar.toast.orderUpdated);
-      closeStatusDialog();
-      if (activeId) void loadUserOrders(activeId, orderTab, serviceId);
-      if (statusTarget.id === activeId) void loadChat();
-    } finally {
-      setStatusBusy(null);
-    }
+  function onStatusChanged(changedId: string) {
+    if (activeId) void loadUserOrders(activeId, orderTab, serviceId);
+    if (changedId === activeId) void loadChat();
   }
 
   const handle = peer?.username ? `@${peer.username.replace(/^@/, "")}` : null;
@@ -1368,74 +1318,19 @@ export function OrderChatDialog({
         )}
       </Dialog>
 
-      <Dialog
+      <StatusChangeDialog
         nested
         open={Boolean(statusTarget)}
         onOpenChange={(next) => {
-          if (!next) closeStatusDialog();
+          if (!next) setStatusTarget(null);
         }}
-        title={ar.changeStatus}
-        description={
-          statusTarget
-            ? `#${statusTarget.orderNumber} · ${STATUS_LABEL[statusTarget.status] ?? statusTarget.status}`
-            : ar.statusChangeMessage
-        }
-        size="md"
-        footer={
-          <Button type="button" variant="outline" onClick={closeStatusDialog}>
-            {ar.cancel}
-          </Button>
-        }
-      >
-        <div className="space-y-4">
-          <div>
-            <Label>{ar.statusChangeMessage}</Label>
-            <textarea
-              className="mt-1 w-full rounded-xl border border-border bg-card px-3 py-2 text-sm outline-none ring-primary/30 focus:ring-2"
-              placeholder={ar.statusChangeMessage}
-              value={statusMessage}
-              onChange={(e) => setStatusMessage(e.target.value)}
-              rows={4}
-            />
-          </div>
-          <div className="flex flex-wrap items-center gap-2 text-sm">
-            <label className="cursor-pointer rounded-xl bg-primary px-3 py-2 text-xs font-medium text-primary-foreground">
-              {ar.attachFile}
-              <input
-                type="file"
-                accept=".png,.jpg,.jpeg,.webp,.pdf,.txt,.csv,.zip,.doc,.docx,.xls,.xlsx,.ppt,.pptx,image/*,application/pdf"
-                className="hidden"
-                onChange={(e) => setStatusFile(e.target.files?.[0] ?? null)}
-              />
-            </label>
-            {statusFile ? (
-              <span className="text-xs text-muted-foreground">
-                {statusFile.name}
-                <button type="button" className="ms-2 text-danger" onClick={() => setStatusFile(null)}>
-                  {ar.delete}
-                </button>
-              </span>
-            ) : (
-              <span className="text-xs text-muted-foreground">{ar.statusChangeFileHint}</span>
-            )}
-          </div>
-          <div className="flex flex-wrap gap-2">
-            {(statusTarget ? TRANSITIONS[statusTarget.status] ?? [] : []).map((s) => (
-              <Button
-                key={s}
-                variant="outline"
-                loading={statusBusy === s}
-                onClick={() => void changeOrderStatus(s)}
-              >
-                {STATUS_LABEL[s]}
-              </Button>
-            ))}
-            {statusTarget && (TRANSITIONS[statusTarget.status] ?? []).length === 0 ? (
-              <div className="text-xs text-muted-foreground">{ar.noTransitions}</div>
-            ) : null}
-          </div>
-        </div>
-      </Dialog>
+        orderId={statusTarget?.id ?? null}
+        orderNumber={statusTarget ? `#${statusTarget.orderNumber}` : undefined}
+        currentStatus={statusTarget?.status}
+        onChanged={() => {
+          if (statusTarget) onStatusChanged(statusTarget.id);
+        }}
+      />
     </Dialog>
   );
 }

@@ -1,16 +1,39 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { FileText, ImageIcon, Pencil, Plus, Trash2, Upload } from "lucide-react";
+import { useState } from "react";
+import {
+  ChevronDown,
+  ChevronUp,
+  FileText,
+  GitBranch,
+  ImageIcon,
+  ListChecks,
+  MessageSquareText,
+  Pencil,
+  Plus,
+  Trash2,
+  Type,
+} from "lucide-react";
 import { ar } from "@/i18n/ar";
 import { Button } from "@/components/ui/button";
 import { Dialog } from "@/components/ui/dialog";
-import { Input } from "@/components/ui/input";
+import { FieldHint, Input, Select } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Badge } from "@/components/ui/badge";
+import { CardHeader, EmptyState } from "@/components/ui/card";
+import type { BranchingRule } from "@/lib/requests/branching";
+import { AuthImage } from "@/components/requests/auth-image";
+import { TelegramMessageComposer } from "@/components/telegram/telegram-message-composer";
+import { OptionsEditor } from "@/components/requests/options-editor";
+import { canMoveField, moveField } from "@/lib/requests/field-order";
 import type { FieldType, RequestField } from "@/types";
 import { nextFieldName } from "@/lib/requests/field-names";
-import { cn } from "@/lib/utils";
-
+import {
+  applyPromptBlocks,
+  editorPromptBlocks,
+  fieldAnswerHint,
+  promptTextOf,
+} from "@/lib/telegram/field-prompt";
 export const FIELD_TYPES: FieldType[] = [
   "TEXT",
   "TEXTAREA",
@@ -28,6 +51,7 @@ export const FIELD_TYPES: FieldType[] = [
   "IMAGE",
   "INSTRUCTION",
   "CONFIRMATION",
+  "DYNAMIC",
 ];
 
 export function createEmptyField(fields: RequestField[]): RequestField {
@@ -46,200 +70,162 @@ export function createEmptyField(fields: RequestField[]): RequestField {
   };
 }
 
-function AuthImage({
-  fileId,
-  localUrl,
-  className,
+function answerButtons(field: RequestField): string[] | undefined {
+  if (field.type === "SELECT" || field.type === "RADIO" || field.type === "CHECKBOX") {
+    return (field.options ?? []).map((o) => o.label);
+  }
+  if (field.type === "CONFIRMATION") return ["نعم", "لا"];
+  return undefined;
+}
+
+function FieldRow({
+  field,
+  index,
+  branchingCount,
+  onEdit,
 }: {
-  fileId?: string | null;
-  localUrl?: string | null;
-  className?: string;
+  field: RequestField;
+  index: number;
+  branchingCount: number;
+  onEdit: () => void;
 }) {
-  const [src, setSrc] = useState<string | null>(localUrl ?? null);
-  const [failed, setFailed] = useState(false);
-
-  useEffect(() => {
-    if (localUrl) {
-      setSrc(localUrl);
-      setFailed(false);
-      return;
-    }
-    if (!fileId) {
-      setSrc(null);
-      return;
-    }
-    let objectUrl: string | null = null;
-    let cancelled = false;
-    setFailed(false);
-    setSrc(null);
-    void (async () => {
-      try {
-        const res = await fetch(`/api/files/${fileId}`, { credentials: "include" });
-        if (!res.ok) throw new Error("load_failed");
-        const blob = await res.blob();
-        if (cancelled) return;
-        objectUrl = URL.createObjectURL(blob);
-        setSrc(objectUrl);
-      } catch {
-        if (!cancelled) setFailed(true);
-      }
-    })();
-    return () => {
-      cancelled = true;
-      if (objectUrl) URL.revokeObjectURL(objectUrl);
-    };
-  }, [fileId, localUrl]);
-
-  if (failed) {
-    return (
-      <div className={cn("flex items-center justify-center bg-muted text-muted-foreground", className)}>
-        <ImageIcon className="size-8 opacity-50" />
-      </div>
-    );
-  }
-  if (!src) {
-    return <div className={cn("animate-pulse bg-muted", className)} />;
-  }
+  const blocks = editorPromptBlocks(field);
+  const image = blocks.find((b) => b.type === "image" && b.storageId);
+  const text = promptTextOf(blocks);
+  const hasText = blocks.some((b) => b.type === "text" && b.text.trim());
+  const hasImage = blocks.some((b) => b.type === "image");
+  const hasDocument = blocks.some((b) => b.type === "document");
   return (
-    // eslint-disable-next-line @next/next/no-img-element
-    <img src={src} alt="" className={className} />
+    <button
+      type="button"
+      onClick={onEdit}
+      className="group flex w-full items-start gap-3 rounded-xl border border-border bg-card px-3 py-3 text-start transition-colors hover:border-primary/40 hover:bg-primary-soft/40 sm:items-center"
+    >
+      <span className="mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-lg bg-muted text-xs font-semibold tabular-nums text-muted-foreground sm:mt-0">
+        {index + 1}
+      </span>
+      <span className="min-w-0 flex-1">
+        <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
+          <span className="truncate text-sm font-semibold">{field.label || field.name}</span>
+          <span className="truncate text-xs text-muted-foreground" dir="ltr">
+            {field.name}
+          </span>
+        </span>
+        <span className="mt-1.5 flex flex-wrap items-center gap-1.5">
+          <Badge tone="neutral">{ar.fieldTypes[field.type]}</Badge>
+          {field.required ? <Badge tone="primary">{ar.required}</Badge> : <Badge tone="neutral">{ar.optional}</Badge>}
+          {branchingCount ? (
+            <Badge tone="info">
+              <GitBranch className="me-1 inline size-3" aria-hidden />
+              {ar.hasBranching} · {branchingCount}
+            </Badge>
+          ) : null}
+          {blocks.length ? (
+            <Badge tone="accent">
+              <MessageSquareText className="me-1 inline size-3" aria-hidden />
+              {ar.hasTelegramContent}
+              {hasText ? <Type className="ms-1 inline size-3" aria-label={ar.promptBlockText} /> : null}
+              {hasImage ? <ImageIcon className="ms-1 inline size-3" aria-label={ar.promptBlockImage} /> : null}
+              {hasDocument ? <FileText className="ms-1 inline size-3" aria-label={ar.promptBlockDocument} /> : null}
+            </Badge>
+          ) : null}
+        </span>
+        {text ? <span className="mt-1.5 line-clamp-1 text-xs text-muted-foreground">{text}</span> : null}
+      </span>
+      {image && image.type === "image" ? (
+        <AuthImage
+          fileId={image.storageId}
+          className="hidden size-11 shrink-0 rounded-lg border border-border bg-muted/40 object-cover sm:block"
+        />
+      ) : null}
+      <span
+        aria-hidden
+        className="flex size-8 shrink-0 items-center justify-center rounded-lg text-muted-foreground transition-colors group-hover:bg-card group-hover:text-primary"
+      >
+        <Pencil className="size-4" />
+      </span>
+      <span className="sr-only">{ar.editField}</span>
+    </button>
   );
 }
 
-function FieldMediaCard({
-  field,
-  localPreviewUrl,
-  uploading,
-  onUpload,
-  onRemove,
+export function FieldMoveButtons({
+  index,
+  canUp,
+  canDown,
+  onMove,
 }: {
-  field: RequestField;
-  localPreviewUrl?: string | null;
-  uploading: boolean;
-  onUpload: (file: File | null) => void;
-  onRemove: () => void;
+  index: number;
+  canUp: boolean;
+  canDown: boolean;
+  onMove: (direction: -1 | 1) => void;
 }) {
-  const mediaId = field.imageFileId || field.attachmentFileId;
-  const isImage = Boolean(field.imageFileId || localPreviewUrl);
-
+  const n = String(index + 1);
   return (
-    <div className="overflow-hidden rounded-2xl border border-border bg-muted/30">
-      <div className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-4 py-3">
-        <div className="min-w-0">
-          <div className="text-sm font-semibold">{ar.fieldPromptFile}</div>
-          <p className="text-xs text-muted-foreground">{ar.fieldPromptFileHint}</p>
-        </div>
-        <label className="inline-flex cursor-pointer items-center gap-1.5 rounded-xl bg-primary px-3 py-2 text-xs font-medium text-primary-foreground hover:opacity-90">
-          <Upload className="size-3.5" />
-          {uploading ? ar.loading : ar.attachFileToField}
-          <input
-            type="file"
-            accept="image/png,image/jpeg,image/webp,application/pdf"
-            className="hidden"
-            disabled={uploading}
-            onChange={(e) => {
-              onUpload(e.target.files?.[0] ?? null);
-              e.target.value = "";
-            }}
-          />
-        </label>
-      </div>
-
-      {mediaId || localPreviewUrl ? (
-        <div className="p-4">
-          {isImage ? (
-            <div className="overflow-hidden rounded-xl border border-border bg-card">
-              <AuthImage
-                fileId={field.imageFileId}
-                localUrl={localPreviewUrl}
-                className="max-h-56 min-h-40 w-full object-contain"
-              />
-              <div className="flex items-center justify-between gap-2 border-t border-border px-3 py-2">
-                {mediaId ? (
-                  <a
-                    href={`/api/files/${mediaId}`}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="text-xs text-primary underline"
-                  >
-                    {ar.viewAttachedFile}
-                  </a>
-                ) : (
-                  <span className="text-xs text-muted-foreground">{ar.preview}</span>
-                )}
-                <Button type="button" variant="ghost" className="h-8 text-danger" onClick={onRemove}>
-                  {ar.removeAttachedFile}
-                </Button>
-              </div>
-            </div>
-          ) : (
-            <div className="flex items-center gap-3 rounded-xl border border-border bg-card p-4">
-              <div className="flex size-12 items-center justify-center rounded-xl bg-muted">
-                <FileText className="size-6 text-primary" />
-              </div>
-              <div className="min-w-0 flex-1">
-                <div className="truncate text-sm font-medium">{ar.attachedFile}</div>
-                {mediaId ? (
-                  <a
-                    href={`/api/files/${mediaId}`}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="text-xs text-primary underline"
-                  >
-                    {ar.viewAttachedFile}
-                  </a>
-                ) : null}
-              </div>
-              <Button type="button" variant="ghost" className="text-danger" onClick={onRemove}>
-                {ar.removeAttachedFile}
-              </Button>
-            </div>
-          )}
-        </div>
-      ) : (
-        <div className="flex flex-col items-center justify-center gap-2 px-4 py-10 text-center">
-          <div className="flex size-14 items-center justify-center rounded-2xl bg-muted">
-            <ImageIcon className="size-7 text-muted-foreground" />
-          </div>
-          <p className="text-sm text-muted-foreground">{ar.noFieldMedia}</p>
-        </div>
-      )}
+    <div className="flex shrink-0 flex-col justify-center gap-1">
+      <Button
+        type="button"
+        variant="ghost"
+        size="icon-sm"
+        aria-label={ar.moveFieldUp.replace("{n}", n)}
+        title={ar.moveUp}
+        disabled={!canUp}
+        onClick={() => onMove(-1)}
+      >
+        <ChevronUp className="size-4" />
+      </Button>
+      <Button
+        type="button"
+        variant="ghost"
+        size="icon-sm"
+        aria-label={ar.moveFieldDown.replace("{n}", n)}
+        title={ar.moveDown}
+        disabled={!canDown}
+        onClick={() => onMove(1)}
+      >
+        <ChevronDown className="size-4" />
+      </Button>
     </div>
+  );
+}
+
+function DialogSection({ title, children }: { title: string; children: React.ReactNode }) {
+  return (
+    <section className="space-y-3">
+      <h3 className="text-sm font-semibold">{title}</h3>
+      {children}
+    </section>
   );
 }
 
 export function DynamicFieldsEditor({
   fields,
+  branchingRules = [],
   onChange,
 }: {
   fields: RequestField[];
+  branchingRules?: BranchingRule[];
   onChange: (fields: RequestField[]) => void;
 }) {
+  function branchingCount(id: string) {
+    return branchingRules.filter((r) => r.sourceFieldId === id || r.targetFieldId === id).length;
+  }
+
   const [editingId, setEditingId] = useState<string | null>(null);
-  const [uploading, setUploading] = useState(false);
-  const [localPreviews, setLocalPreviews] = useState<Record<string, string>>({});
 
   const editingIndex = fields.findIndex((f) => f.id === editingId);
   const editing = editingIndex >= 0 ? fields[editingIndex] : null;
   const dialogOpen = Boolean(editing);
 
-  function clearLocalPreview(fieldId: string) {
-    setLocalPreviews((prev) => {
-      const url = prev[fieldId];
-      if (url) URL.revokeObjectURL(url);
-      const next = { ...prev };
-      delete next[fieldId];
-      return next;
-    });
-  }
-
   function update(idx: number, patch: Partial<RequestField>) {
     onChange(fields.map((x, i) => (i === idx ? { ...x, ...patch } : x)));
   }
 
+  function replaceField(idx: number, next: RequestField) {
+    onChange(fields.map((x, i) => (i === idx ? next : x)));
+  }
+
   function remove(idx: number) {
-    const fieldId = fields[idx]?.id;
-    if (fieldId) clearLocalPreview(fieldId);
     const next = fields.filter((_, i) => i !== idx).map((f, i) => ({ ...f, order: i }));
     onChange(next);
     setEditingId(null);
@@ -251,109 +237,54 @@ export function DynamicFieldsEditor({
     setEditingId(field.id);
   }
 
-  async function uploadFieldMedia(idx: number, file: File | null) {
-    if (!file) return;
-    const fieldId = fields[idx]?.id;
-    if (!fieldId) return;
-
-    if (file.type.startsWith("image/")) {
-      const previewUrl = URL.createObjectURL(file);
-      setLocalPreviews((prev) => {
-        if (prev[fieldId]) URL.revokeObjectURL(prev[fieldId]);
-        return { ...prev, [fieldId]: previewUrl };
-      });
-    } else {
-      clearLocalPreview(fieldId);
-    }
-
-    setUploading(true);
-    try {
-      const fd = new FormData();
-      fd.append("file", file);
-      fd.append("ownerId", fieldId);
-      const res = await fetch("/api/uploads", { method: "POST", body: fd });
-      if (!res.ok) {
-        clearLocalPreview(fieldId);
-        return;
-      }
-      const data = await res.json();
-      const fileId = String(data.fileId);
-      const isImage = String(data.mimeType ?? "").startsWith("image/");
-      update(
-        idx,
-        isImage
-          ? { imageFileId: fileId, attachmentFileId: undefined }
-          : { attachmentFileId: fileId, imageFileId: undefined },
-      );
-    } finally {
-      setUploading(false);
-    }
-  }
-
   return (
-    <div className="flex min-h-0 flex-col rounded-2xl border border-border bg-card">
-      <div className="flex shrink-0 items-center justify-between gap-2 border-b border-border px-4 py-3">
-        <div className="text-sm font-semibold">
-          {ar.fields}
-          <span className="ms-1 text-xs font-normal text-muted-foreground">({fields.length})</span>
-        </div>
-        <Button type="button" variant="outline" className="h-8 gap-1 px-2.5 text-xs" onClick={addField}>
-          <Plus className="size-3.5" />
-          {ar.addField}
-        </Button>
-      </div>
+    <div className="flex min-h-0 flex-col rounded-2xl border border-border bg-card shadow-card">
+      <CardHeader
+        icon={<ListChecks />}
+        title={
+          <>
+            {ar.formFields}
+            <span className="ms-1.5 text-xs font-normal text-muted-foreground tabular-nums">({fields.length})</span>
+          </>
+        }
+        description={fields.length ? ar.formFieldsHint : undefined}
+        actions={
+          <Button type="button" variant="outline" size="sm" onClick={addField}>
+            <Plus className="size-3.5" />
+            {ar.addField}
+          </Button>
+        }
+      />
 
       <div className="p-3">
         {fields.length === 0 ? (
-          <div className="flex min-h-[180px] flex-col items-center justify-center gap-3 text-center">
-            <p className="text-sm text-muted-foreground">{ar.fieldsListEmpty}</p>
-            <Button type="button" variant="outline" onClick={addField}>
-              <Plus className="size-4" />
-              {ar.addField}
-            </Button>
-          </div>
+          <EmptyState
+            className="py-8"
+            icon={<ListChecks />}
+            title={ar.fieldsListEmpty}
+            action={
+              <Button type="button" variant="secondary" size="sm" onClick={addField}>
+                <Plus className="size-3.5" />
+                {ar.addField}
+              </Button>
+            }
+          />
         ) : (
-          <ul className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
+          <ol className="space-y-2">
             {fields.map((f, idx) => (
-              <li key={f.id}>
-                <button
-                  type="button"
-                  onClick={() => setEditingId(f.id)}
-                  className={cn(
-                    "group flex w-full flex-col gap-2 rounded-2xl border border-border bg-muted/25 p-3 text-start transition hover:border-primary/40 hover:bg-muted/50",
-                  )}
-                >
-                  <div className="flex items-start justify-between gap-2">
-                    <div className="min-w-0">
-                      <div className="truncate text-sm font-semibold">
-                        {idx + 1}. {f.label || f.name}
-                      </div>
-                      <div className="truncate text-xs text-muted-foreground">{ar.fieldTypes[f.type]}</div>
-                    </div>
-                    <span className="rounded-lg bg-card p-1.5 text-muted-foreground group-hover:text-primary">
-                      <Pencil className="size-3.5" />
-                    </span>
-                  </div>
-                  {f.imageFileId || localPreviews[f.id] ? (
-                    <div className="overflow-hidden rounded-xl border border-border bg-card">
-                      <AuthImage
-                        fileId={f.imageFileId}
-                        localUrl={localPreviews[f.id]}
-                        className="h-28 w-full object-contain bg-muted/40"
-                      />
-                    </div>
-                  ) : f.attachmentFileId ? (
-                    <div className="flex items-center gap-2 rounded-xl border border-border bg-card px-2 py-1.5 text-xs text-muted-foreground">
-                      <FileText className="size-3.5 shrink-0" />
-                      <span className="truncate">{ar.attachedFile}</span>
-                    </div>
-                  ) : f.telegramMessage ? (
-                    <p className="line-clamp-2 text-xs text-muted-foreground">{f.telegramMessage}</p>
-                  ) : null}
-                </button>
+              <li key={f.id} className="flex items-stretch gap-1.5">
+                <div className="min-w-0 flex-1">
+                  <FieldRow field={f} index={idx} branchingCount={branchingCount(f.id)} onEdit={() => setEditingId(f.id)} />
+                </div>
+                <FieldMoveButtons
+                  index={idx}
+                  canUp={canMoveField(fields, idx, -1)}
+                  canDown={canMoveField(fields, idx, 1)}
+                  onMove={(direction) => onChange(moveField(fields, idx, direction))}
+                />
               </li>
             ))}
-          </ul>
+          </ol>
         )}
       </div>
 
@@ -373,8 +304,8 @@ export function DynamicFieldsEditor({
             {editingIndex >= 0 ? (
               <Button
                 type="button"
-                variant="ghost"
-                className="me-auto text-danger"
+                variant="danger-ghost"
+                className="me-auto"
                 onClick={() => remove(editingIndex)}
               >
                 <Trash2 className="size-4" />
@@ -388,102 +319,104 @@ export function DynamicFieldsEditor({
         }
       >
         {editing && editingIndex >= 0 ? (
-          <div className="space-y-5">
-            <div className="grid gap-4 sm:grid-cols-2">
-              <div className="space-y-1.5">
-                <Label>{ar.displayName}</Label>
-                <Input
-                  value={editing.label}
-                  onChange={(e) => update(editingIndex, { label: e.target.value })}
-                  placeholder={ar.displayName}
-                />
+          <div className="space-y-6">
+            <DialogSection title={ar.basicInfo}>
+              <div className="grid gap-4 sm:grid-cols-2">
+                <div>
+                  <Label htmlFor="field-label">{ar.displayName}</Label>
+                  <Input
+                    id="field-label"
+                    value={editing.label}
+                    onChange={(e) => update(editingIndex, { label: e.target.value })}
+                    placeholder={ar.displayName}
+                  />
+                </div>
+                <div>
+                  <Label htmlFor="field-name">{ar.name}</Label>
+                  <Input
+                    id="field-name"
+                    dir="ltr"
+                    className="text-start"
+                    value={editing.name}
+                    onChange={(e) => update(editingIndex, { name: e.target.value })}
+                    placeholder={ar.name}
+                  />
+                  <FieldHint>{ar.fieldNameHint}</FieldHint>
+                </div>
+                <div>
+                  <Label htmlFor="field-type">{ar.type}</Label>
+                  <Select
+                    id="field-type"
+                    value={editing.type}
+                    onChange={(e) => {
+                      const type = e.target.value as FieldType;
+                      update(editingIndex, { type });
+                    }}
+                  >
+                    {FIELD_TYPES.map((t) => (
+                      <option key={t} value={t}>
+                        {ar.fieldTypes[t]}
+                      </option>
+                    ))}
+                  </Select>
+                </div>
+                <label className="flex cursor-pointer items-start gap-2.5 self-end rounded-xl border border-border bg-muted/30 px-3 py-2.5 text-sm transition-colors hover:border-border-strong">
+                  <input
+                    type="checkbox"
+                    className="mt-0.5 size-4 shrink-0 accent-primary"
+                    checked={editing.required}
+                    onChange={(e) => update(editingIndex, { required: e.target.checked })}
+                  />
+                  <span>
+                    <span className="font-medium">{ar.required}</span>
+                    <span className="block text-xs text-muted-foreground">{ar.requiredHint}</span>
+                  </span>
+                </label>
               </div>
-              <div className="space-y-1.5">
-                <Label>{ar.name}</Label>
-                <Input
-                  value={editing.name}
-                  onChange={(e) => update(editingIndex, { name: e.target.value })}
-                  placeholder={ar.name}
-                />
-              </div>
-              <div className="space-y-1.5">
-                <Label>{ar.type}</Label>
-                <select
-                  className="w-full rounded-xl border border-border bg-card px-3 py-2.5 text-sm outline-none ring-primary/30 focus:ring-2"
-                  value={editing.type}
-                  onChange={(e) => {
-                    const type = e.target.value as FieldType;
-                    update(editingIndex, { type });
-                  }}
-                >
-                  {FIELD_TYPES.map((t) => (
-                    <option key={t} value={t}>
-                      {ar.fieldTypes[t]}
-                    </option>
-                  ))}
-                </select>
-              </div>
-              <div className="space-y-1.5 sm:col-span-2">
-                <Label>{ar.telegramMessage}</Label>
-                <textarea
-                  value={editing.telegramMessage ?? ""}
-                  onChange={(e) => update(editingIndex, { telegramMessage: e.target.value })}
-                  placeholder={ar.telegramMessage}
-                  rows={3}
-                  className="w-full rounded-xl border border-border bg-card px-3 py-2.5 text-sm outline-none ring-primary/30 focus:ring-2"
-                />
-              </div>
-            </div>
 
-            {(editing.type === "FILE" || editing.type === "IMAGE") && (
-              <p className="rounded-xl border border-primary/20 bg-primary/5 px-3 py-2 text-xs text-muted-foreground">
-                {editing.type === "IMAGE"
-                  ? "سيطلب البوت من المستخدم إرسال صورة (مثل QR)."
-                  : "سيطلب البوت من المستخدم إرسال ملف."}
-              </p>
-            )}
+              {(editing.type === "FILE" || editing.type === "IMAGE" || editing.type === "DYNAMIC") && (
+                <p className="rounded-xl bg-info-soft px-3 py-2 text-xs leading-relaxed text-info">
+                  {editing.type === "IMAGE"
+                    ? "سيطلب البوت من المستخدم إرسال صورة (مثل QR)."
+                    : editing.type === "DYNAMIC"
+                      ? "يمكن للمستخدم إرسال أي محتوى تيليجرام مدعوم: نص، صورة، صوت، فيديو، ملف، موقع أو جهة اتصال."
+                      : "سيطلب البوت من المستخدم إرسال ملف."}
+                </p>
+              )}
+            </DialogSection>
 
             {(editing.type === "SELECT" || editing.type === "RADIO" || editing.type === "CHECKBOX") && (
-              <div className="space-y-1.5">
-                <Label>{ar.optionsHint}</Label>
-                <Input
-                  value={(editing.options ?? []).map((o) => o.label).join(", ")}
-                  onChange={(e) =>
-                    update(editingIndex, {
-                      options: e.target.value
-                        .split(",")
-                        .map((s) => s.trim())
-                        .filter(Boolean)
-                        .map((label) => ({ label, value: label })),
-                    })
-                  }
-                  placeholder={ar.optionsHint}
+              <DialogSection title={ar.answerOptions}>
+                <OptionsEditor
+                  field={editing}
+                  rules={branchingRules}
+                  onChange={(options) => update(editingIndex, { options })}
                 />
-              </div>
+              </DialogSection>
             )}
 
-            <FieldMediaCard
-              field={editing}
-              localPreviewUrl={localPreviews[editing.id]}
-              uploading={uploading}
-              onUpload={(file) => void uploadFieldMedia(editingIndex, file)}
-              onRemove={() => {
-                clearLocalPreview(editing.id);
-                update(editingIndex, { imageFileId: undefined, attachmentFileId: undefined });
-              }}
+            <TelegramMessageComposer
+              ownerId={editing.id}
+              blocks={editorPromptBlocks(editing)}
+              onChange={(blocks) => replaceField(editingIndex, applyPromptBlocks(editing, blocks))}
+              fallbackLabel={editing.label || editing.name}
+              hint={fieldAnswerHint(editing.type)}
+              buttons={answerButtons(editing)}
             />
 
-            <div className="flex flex-wrap gap-6 rounded-2xl border border-border bg-muted/25 px-4 py-3">
-              <label className="flex items-center gap-2 text-sm">
-                <input
-                  type="checkbox"
-                  className="size-4 accent-primary"
-                  checked={editing.required}
-                  onChange={(e) => update(editingIndex, { required: e.target.checked })}
-                />
-                {ar.required}
-              </label>
-            </div>
+            <DialogSection title={ar.branching}>
+              <div className="flex items-start gap-2.5 rounded-xl border border-border bg-muted/30 px-3 py-2.5 text-sm">
+                <GitBranch className="mt-0.5 size-4 shrink-0 text-muted-foreground" aria-hidden />
+                <div>
+                  <p>
+                    {branchingCount(editing.id)
+                      ? ar.fieldBranchingSummary.replace("{count}", String(branchingCount(editing.id)))
+                      : ar.fieldBranchingNone}
+                  </p>
+                  <p className="mt-0.5 text-xs text-muted-foreground">{ar.fieldBranchingManage}</p>
+                </div>
+              </div>
+            </DialogSection>
           </div>
         ) : null}
       </Dialog>

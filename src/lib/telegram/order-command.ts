@@ -1,14 +1,40 @@
 export const ORDER_STATUS_AR: Record<string, string> = {
   PENDING: "قيد الانتظار",
   REVIEWING: "قيد المراجعة",
-  COMPLETED: "منجزة",
+  IN_PROGRESS: "قيد المعالجة",
+  RESOLVED: "تم الحل",
   REJECTED: "مرفوضة",
-  ARCHIVED: "مؤرشفة",
+  CLOSED: "مغلقة",
+  COMPLETED: "تم الحل",
+  ARCHIVED: "مغلقة",
 };
 
 export function orderStatusLabel(status: unknown) {
   const key = String(status ?? "");
   return ORDER_STATUS_AR[key] ?? key;
+}
+
+/**
+ * Status update sent to the complaint owner. Only the rejection reason and the explicit
+ * message to the user are user-facing; resolution/closing notes and admin notes stay internal.
+ */
+export function statusUpdateTelegramText(params: {
+  orderNumber: unknown;
+  status: unknown;
+  message?: string | null;
+  reason?: string | null;
+}) {
+  const message = params.message?.trim();
+  const reason = params.reason?.trim();
+  return [
+    "تحديث على شكواك",
+    `#${params.orderNumber}`,
+    `الحالة: ${orderStatusLabel(params.status)}`,
+    reason ? `\nسبب الرفض:\n${reason}` : "",
+    message ? `\n${message}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n");
 }
 
 /** Telegram slash command for an order, e.g. ORD-00012 → o_00012 */
@@ -29,7 +55,7 @@ export function orderDigitsFromCommand(command: string) {
 }
 
 export function orderNumberLookup(digits: number) {
-  return { $regex: `^ORD-0*${digits}$` };
+  return { $regex: `^(ORD|SHK)-0*${digits}$` };
 }
 
 export function formatOrderCommandLine(orderNumber: unknown, status: unknown, name?: unknown) {

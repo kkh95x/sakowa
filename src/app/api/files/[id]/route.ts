@@ -11,7 +11,7 @@ export const dynamic = "force-dynamic";
 
 export async function GET(_req: Request, ctx: Ctx) {
   try {
-    await withAuth();
+    await withAuth(["ADMIN", "SUPER_ADMIN"]);
   } catch {
     return NextResponse.json({ error: "UNAUTHORIZED" }, { status: 401 });
   }

@@ -1,7 +1,21 @@
 import { ObjectId } from "mongodb";
 import { collections, getDb } from "@/lib/db/client";
 import { WebPushService } from "@/lib/notifications/web-push-service";
+import { logJson } from "@/lib/log";
 import type { NotificationType } from "@/types";
+
+export function adminRecipientQuery() {
+  return { role: { $in: ["ADMIN", "SUPER_ADMIN"] }, status: "ACTIVE" };
+}
+
+export function complaintNotificationUrl(orderId?: string | null) {
+  return orderId ? `/complaints/${orderId}` : "/notifications";
+}
+
+export function notificationDedupeWindowMs() {
+  return 5000;
+}
+
 export class NotificationService {
   static async create(params: {
     recipientUserId: string;
@@ -13,43 +27,85 @@ export class NotificationService {
     orderId?: string;
     requestTypeId?: string;
     botId?: string;
+    eventKey?: string;
   }) {
     const db = await getDb();
+    const eventKey =
+      params.eventKey ||
+      [params.type, params.recipientUserId, params.orderId ?? params.entityId ?? "", params.title].join(":");
     const existing = await db.collection(collections.notifications).findOne({
       recipientUserId: params.recipientUserId,
       type: params.type,
       orderId: params.orderId ?? null,
-      createdAt: { $gt: new Date(Date.now() - 5000) },
+      eventKey,
+      createdAt: { $gt: new Date(Date.now() - notificationDedupeWindowMs()) },
     });
-    if (existing) return String(existing._id);
+    if (existing) {
+      logJson("info", "notifications", "deduped", {
+        notificationId: String(existing._id),
+        type: params.type,
+        recipientUserId: params.recipientUserId,
+      });
+      return String(existing._id);
+    }
+    const createdAt = new Date();
     const result = await db.collection(collections.notifications).insertOne({
       ...params,
+      eventKey,
       read: false,
       readAt: null,
-      createdAt: new Date(),
+      createdAt,
     });
+    const notificationId = String(result.insertedId);
     await db.collection(collections.notificationOutbox).insertOne({
-      notificationId: String(result.insertedId),
+      notificationId,
       status: "PENDING",
       attempts: 0,
-      createdAt: new Date(),
+      createdAt,
+      updatedAt: createdAt,
     });
-    void WebPushService.deliverNotification(String(result.insertedId)).catch(() => undefined);
-    return String(result.insertedId);
+    logJson("info", "notifications", "created", {
+      notificationId,
+      type: params.type,
+      recipientUserId: params.recipientUserId,
+      orderId: params.orderId ?? null,
+    });
+    void WebPushService.deliverNotification(notificationId).catch((err) => {
+      logJson("error", "notifications", "push_enqueue_failed", {
+        notificationId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    });
+    return notificationId;
   }
 
   static async notifyAdmins(params: Omit<Parameters<typeof this.create>[0], "recipientUserId">) {
     const db = await getDb();
     const admins = await db
       .collection(collections.users)
-      .find({ role: "ADMIN", status: "ACTIVE" }, { projection: { _id: 1 } })
+      .find(adminRecipientQuery(), { projection: { _id: 1 } })
       .toArray();
-    for (const admin of admins) {
-      await this.create({ ...params, recipientUserId: String(admin._id) });
+    if (!admins.length) {
+      logJson("warn", "notifications", "no_admin_recipients", { type: params.type });
     }
+    const ids: string[] = [];
+    for (const admin of admins) {
+      ids.push(await this.create({ ...params, recipientUserId: String(admin._id) }));
+    }
+    return ids;
   }
 
   static async notifyAdminsNewOrder(params: {
+    orderId: string;
+    orderNumber: string;
+    requestTypeId: string;
+    botId: string;
+    telegramUsername?: string;
+  }) {
+    return this.notifyAdminsNewComplaint(params);
+  }
+
+  static async notifyAdminsNewComplaint(params: {
     orderId: string;
     orderNumber: string;
     requestTypeId: string;
@@ -61,15 +117,16 @@ export class NotificationService {
       _id: new ObjectId(params.requestTypeId),
     });
     const userLine = params.telegramUsername ? `@${params.telegramUsername}` : "مستخدم Telegram";
-    await this.notifyAdmins({
-      type: "NEW_ORDER",
-      title: "🆕 طلب جديد",
-      message: `تم استلام طلب جديد:\n#${params.orderNumber}\nالخدمة: ${request?.name ?? ""}\nالمستخدم:\n${userLine}`,
-      entityType: "order",
+    return this.notifyAdmins({
+      type: "NEW_COMPLAINT",
+      title: "🆕 شكوى جديدة",
+      message: `تم استلام شكوى جديدة:\n#${params.orderNumber}\nنوع الشكوى: ${request?.name ?? ""}\nالمستخدم:\n${userLine}`,
+      entityType: "complaint",
       entityId: params.orderId,
       orderId: params.orderId,
       requestTypeId: params.requestTypeId,
       botId: params.botId,
+      eventKey: `NEW_COMPLAINT:${params.orderId}`,
     });
   }
 
@@ -96,6 +153,44 @@ export class NotificationService {
       db.collection(collections.notifications).countDocuments(query),
     ]);
     return { items, total, unread: await this.unreadCount(userId) };
+  }
+
+  static async listSince(userId: string, since: Date, limit = 20) {
+    const db = await getDb();
+    return db
+      .collection(collections.notifications)
+      .find({
+        recipientUserId: userId,
+        createdAt: { $gt: since },
+      })
+      .sort({ createdAt: 1 })
+      .limit(limit)
+      .toArray();
+  }
+
+  static async getOwned(id: string, userId: string) {
+    if (!ObjectId.isValid(id)) return null;
+    const db = await getDb();
+    return db.collection(collections.notifications).findOne({
+      _id: new ObjectId(id),
+      recipientUserId: userId,
+    });
+  }
+
+  static serialize(doc: Record<string, unknown>) {
+    return {
+      id: String(doc._id),
+      title: String(doc.title ?? ""),
+      message: String(doc.message ?? ""),
+      type: String(doc.type ?? ""),
+      read: Boolean(doc.read),
+      createdAt: doc.createdAt,
+      orderId: doc.orderId ? String(doc.orderId) : undefined,
+      requestTypeId: doc.requestTypeId ? String(doc.requestTypeId) : undefined,
+      entityType: doc.entityType ? String(doc.entityType) : undefined,
+      entityId: doc.entityId ? String(doc.entityId) : undefined,
+      url: complaintNotificationUrl(doc.orderId ? String(doc.orderId) : null),
+    };
   }
 
   static async markRead(id: string, userId: string) {

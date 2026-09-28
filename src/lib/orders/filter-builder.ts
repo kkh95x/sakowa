@@ -26,6 +26,7 @@ export function operatorsForField(type: FieldType): FilterOperator[] {
     case "CHECKBOX":
     case "CONFIRMATION":
       return BOOL_OPS;
+    case "DYNAMIC":
     default:
       return TEXT_OPS;
   }

@@ -48,6 +48,16 @@ export async function registerNode() {
           error: err instanceof Error ? err.message : String(err),
         });
       }
+
+      try {
+        const { startNotificationOutboxWorker } = await import("@/lib/notifications/outbox-worker");
+        startNotificationOutboxWorker();
+        logJson("info", "notifications", "outbox_worker_started", {});
+      } catch (err) {
+        logJson("error", "notifications", "outbox_worker_failed", {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
     })();
   }, 1500);
 }

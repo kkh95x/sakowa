@@ -11,6 +11,17 @@ export function isPushSupported() {
   return typeof window !== "undefined" && "serviceWorker" in navigator && "PushManager" in window;
 }
 
+export async function isPushServerConfigured() {
+  try {
+    const res = await fetch("/api/notifications/push/public-key");
+    if (!res.ok) return false;
+    const { publicKey, enabled } = (await res.json()) as { publicKey?: string | null; enabled?: boolean };
+    return Boolean(enabled && publicKey);
+  } catch {
+    return false;
+  }
+}
+
 export async function subscribeToPushNotifications(): Promise<"granted" | "denied" | "unsupported" | "failed"> {
   if (!isPushSupported()) return "unsupported";
 

@@ -1,16 +1,22 @@
+import { MessageSquareWarning } from "lucide-react";
 import { LoginForm } from "@/components/auth/login-form";
 import { ar } from "@/i18n/ar";
 
 export default function LoginPage() {
   return (
-    <div className="flex min-h-screen items-center justify-center bg-[radial-gradient(circle_at_top,_#1b6b4a22,_transparent_45%),linear-gradient(180deg,#f7f3ea,#ebe4d6)] p-4">
-      <div className="w-full max-w-md rounded-3xl border border-border bg-card p-8 shadow-xl">
-        <div className="mb-8 text-center">
-          <div className="text-3xl font-bold text-primary">{ar.brand}</div>
-          <p className="mt-2 text-sm text-muted-foreground">{ar.tagline}</p>
+    <main className="flex min-h-dvh items-center justify-center bg-background p-4">
+      <div className="w-full max-w-sm">
+        <div className="mb-6 flex flex-col items-center text-center">
+          <span className="mb-3 flex size-12 items-center justify-center rounded-2xl bg-primary text-primary-foreground shadow-card">
+            <MessageSquareWarning className="size-6" aria-hidden />
+          </span>
+          <h1 className="text-2xl font-semibold tracking-tight">{ar.brand}</h1>
+          <p className="mt-1 text-sm text-muted-foreground">{ar.tagline}</p>
         </div>
-        <LoginForm />
+        <div className="rounded-2xl border border-border bg-card p-6 shadow-card sm:p-7">
+          <LoginForm />
+        </div>
       </div>
-    </div>
+    </main>
   );
 }

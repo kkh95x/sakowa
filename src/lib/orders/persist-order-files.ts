@@ -3,66 +3,63 @@ import { logJson } from "@/lib/log";
 import { GridFSStorageService } from "@/lib/storage/gridfs";
 import { resolveUploadMime } from "@/lib/storage/mime";
 import { TelegramService } from "@/lib/telegram/telegram-service";
+import { isDynamicAnswer, type TelegramFileKind } from "@/lib/telegram/normalize-input";
 import type { FilePurpose, RequestField } from "@/types";
 
 export type StoredFileField = {
   telegramFileId: string;
-  kind: "photo" | "document";
+  kind: TelegramFileKind | "photo" | "document";
   gridFsId: string;
   filename: string | null;
 };
 
-function filePurpose(field: RequestField, kind: "photo" | "document"): FilePurpose {
+function filePurpose(field: RequestField, kind: string): FilePurpose {
   if (field.type === "IMAGE" || kind === "photo") return "REQUEST_IMAGE";
   return "ORDER_ATTACHMENT";
 }
 
-function normalizeFileField(
-  raw: unknown,
-  field: RequestField,
-): { meta: Omit<StoredFileField, "gridFsId"> & { gridFsId?: string | null }; needsDownload: boolean } | null {
-  if (raw === undefined || raw === null || raw === "") return null;
-
-  if (typeof raw === "string") {
-    const trimmed = raw.trim();
-    if (!trimmed || !/^[A-Za-z0-9_-]{20,}$/.test(trimmed)) return null;
-    const kind: "photo" | "document" = field.type === "IMAGE" ? "photo" : "document";
-    return {
-      meta: {
-        telegramFileId: trimmed,
-        kind,
-        gridFsId: null,
-        filename: kind === "photo" ? "photo.jpg" : null,
-      },
-      needsDownload: true,
-    };
+function defaultFilename(kind: string) {
+  switch (kind) {
+    case "photo":
+      return "photo.jpg";
+    case "voice":
+      return "voice.ogg";
+    case "audio":
+      return "audio.mp3";
+    case "video":
+    case "video_note":
+      return "video.mp4";
+    case "animation":
+      return "animation.mp4";
+    case "sticker":
+      return "sticker.webp";
+    default:
+      return "attachment.bin";
   }
+}
 
-  if (typeof raw !== "object") return null;
-  const value = raw as {
-    telegramFileId?: string;
-    kind?: "photo" | "document";
-    gridFsId?: string | null;
-    filename?: string | null;
-  };
-  const telegramFileId = value.telegramFileId?.trim();
-  if (!telegramFileId && !value.gridFsId) return null;
+const TELEGRAM_FILE_ID_RE = /^[A-Za-z0-9_-]{20,}$/;
 
-  const kind: "photo" | "document" =
-    value.kind || (field.type === "IMAGE" ? "photo" : "document");
+function telegramFileIdOf(raw: unknown): string {
+  if (!raw || typeof raw !== "object") {
+    const trimmed = typeof raw === "string" ? raw.trim() : "";
+    return TELEGRAM_FILE_ID_RE.test(trimmed) ? trimmed : "";
+  }
+  const value = raw as { telegramFileId?: string; fileId?: string };
+  return String(value.telegramFileId || value.fileId || "").trim();
+}
 
-  const gridFsId = value.gridFsId ? String(value.gridFsId) : null;
-  const hasValidGridFs = gridFsId && ObjectId.isValid(gridFsId);
+function gridFsIdOf(raw: unknown): string | null {
+  if (!raw || typeof raw !== "object") return null;
+  const value = raw as { gridFsId?: string | null; storageId?: string | null };
+  const id = value.gridFsId || value.storageId;
+  return id && ObjectId.isValid(String(id)) ? String(id) : null;
+}
 
-  return {
-    meta: {
-      telegramFileId: telegramFileId || "",
-      kind,
-      gridFsId: hasValidGridFs ? gridFsId : null,
-      filename: value.filename ?? null,
-    },
-    needsDownload: !hasValidGridFs,
-  };
+export function isPersistableFileField(field: RequestField, raw: unknown) {
+  if (field.type === "FILE" || field.type === "IMAGE" || field.type === "DYNAMIC") return true;
+  if (!raw || typeof raw !== "object") return false;
+  return Boolean(telegramFileIdOf(raw) || gridFsIdOf(raw));
 }
 
 export async function persistOrderFieldFiles(params: {
@@ -76,52 +73,61 @@ export async function persistOrderFieldFiles(params: {
   const attachments = new Set<string>();
 
   for (const field of params.fieldDefs) {
-    if (field.type !== "FILE" && field.type !== "IMAGE") continue;
-
-    const normalized = normalizeFileField(fields[field.name], field);
-    if (!normalized) continue;
-
-    const { meta, needsDownload } = normalized;
-    if (!needsDownload && meta.gridFsId) {
-      attachments.add(meta.gridFsId);
-      fields[field.name] = {
-        telegramFileId: meta.telegramFileId,
-        kind: meta.kind,
-        gridFsId: meta.gridFsId,
-        filename: meta.filename,
-      };
+    const raw = fields[field.name] ?? fields[field.id];
+    if (!isPersistableFileField(field, raw)) continue;
+    const telegramFileId = telegramFileIdOf(raw);
+    const existingGrid = gridFsIdOf(raw);
+    if (existingGrid) {
+      attachments.add(existingGrid);
+      if (isDynamicAnswer(raw)) {
+        fields[field.name] = { ...raw, storageId: existingGrid };
+      }
       continue;
     }
+    if (!telegramFileId) continue;
 
-    if (!meta.telegramFileId) {
-      throw new Error(`FILE_NOT_STORED:${field.name}`);
-    }
+    const kind =
+      (raw && typeof raw === "object"
+        ? String((raw as { kind?: string; contentType?: string }).kind || (raw as { contentType?: string }).contentType || "")
+        : "") || (field.type === "IMAGE" ? "photo" : "document");
+    const filename =
+      (raw && typeof raw === "object" ? String((raw as { filename?: string }).filename ?? "") : "") ||
+      defaultFilename(kind);
 
-    // A failed copy into GridFS must not discard the order: the Telegram file id
-    // stays usable as a fallback source for admins viewing the answer.
     try {
-      const downloaded = await TelegramService.downloadFile(params.botId, meta.telegramFileId);
-      const filename =
-        meta.filename?.trim() ||
-        downloaded.filename ||
-        (meta.kind === "photo" ? "photo.jpg" : "attachment.bin");
-      const mimeType = resolveUploadMime(filename, downloaded.mimeType);
+      const downloaded = await TelegramService.downloadFile(params.botId, telegramFileId);
+      const savedName = filename.trim() || downloaded.filename || defaultFilename(kind);
+      const mimeType = resolveUploadMime(
+        savedName,
+        (raw && typeof raw === "object" ? String((raw as { mimeType?: string }).mimeType ?? "") : "") ||
+          downloaded.mimeType,
+      );
       const gridFsId = await GridFSStorageService.save({
         buffer: downloaded.buffer,
-        filename,
+        filename: savedName,
         mimeType,
         ownerType: "order",
         ownerId: params.orderId,
         uploadedBy: String(params.telegramUserId),
-        purpose: filePurpose(field, meta.kind),
+        purpose: filePurpose(field, kind),
       });
-
-      fields[field.name] = {
-        telegramFileId: meta.telegramFileId,
-        kind: meta.kind,
-        gridFsId,
-        filename,
-      };
+      if (field.type === "DYNAMIC" || isDynamicAnswer(raw)) {
+        const base = isDynamicAnswer(raw) ? raw : { inputType: "dynamic" as const, contentType: kind, text: null, metadata: {} };
+        fields[field.name] = {
+          ...base,
+          fileId: telegramFileId,
+          storageId: gridFsId,
+          filename: savedName,
+          mimeType,
+        };
+      } else {
+        fields[field.name] = {
+          telegramFileId,
+          kind: kind === "photo" ? "photo" : "document",
+          gridFsId,
+          filename: savedName,
+        };
+      }
       attachments.add(gridFsId);
     } catch (err) {
       logJson("error", "orders", "FIELD_FILE_PERSIST_FAILED", {
@@ -130,18 +136,17 @@ export async function persistOrderFieldFiles(params: {
         field: field.name,
         error: err instanceof Error ? err.message : String(err),
       });
-      console.error("FIELD_FILE_PERSIST_FAILED", {
-        orderId: params.orderId,
-        botId: params.botId,
-        field: field.name,
-        error: err,
-      });
-      fields[field.name] = {
-        telegramFileId: meta.telegramFileId,
-        kind: meta.kind,
-        gridFsId: null,
-        filename: meta.filename,
-      };
+      if (field.type === "DYNAMIC" || isDynamicAnswer(raw)) {
+        const base = isDynamicAnswer(raw) ? raw : { inputType: "dynamic" as const, contentType: kind, text: null, metadata: {} };
+        fields[field.name] = { ...base, fileId: telegramFileId, storageId: null, filename };
+      } else {
+        fields[field.name] = {
+          telegramFileId,
+          kind: kind === "photo" ? "photo" : "document",
+          gridFsId: null,
+          filename,
+        };
+      }
     }
   }
 
@@ -153,7 +158,7 @@ export async function persistTelegramUpload(params: {
   telegramUserId: number;
   field: RequestField;
   telegramFileId: string;
-  kind: "photo" | "document";
+  kind: TelegramFileKind | "photo" | "document";
   filename?: string | null;
   mimeType?: string | null;
   ownerId?: string;
@@ -162,7 +167,7 @@ export async function persistTelegramUpload(params: {
   const filename =
     params.filename?.trim() ||
     downloaded.filename ||
-    (params.kind === "photo" ? "photo.jpg" : "attachment.bin");
+    defaultFilename(params.kind);
   const mimeType = resolveUploadMime(filename, params.mimeType ?? downloaded.mimeType);
   const gridFsId = await GridFSStorageService.save({
     buffer: downloaded.buffer,

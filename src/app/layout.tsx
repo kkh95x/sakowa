@@ -4,7 +4,7 @@ import { Providers } from "@/components/providers";
 
 export const metadata: Metadata = {
   title: "Shakowa",
-  description: "منصة إدارة طلبات تيليجرام",
+  description: "منصة إدارة الشكاوى عبر تيليجرام",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

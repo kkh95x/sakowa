@@ -51,7 +51,7 @@ export function LoginForm() {
   if (optional2fa) {
     return (
       <div className="space-y-4 text-center">
-        <h2 className="text-xl font-bold">{ar.protectAccount}</h2>
+        <h2 className="text-lg font-semibold">{ar.protectAccount}</h2>
         <p className="text-sm text-muted-foreground">{ar.twoFactorRecommend}</p>
         <div className="flex gap-2">
           <Button className="flex-1" onClick={() => router.push("/settings?setup2fa=1")}>
@@ -93,7 +93,7 @@ export function LoginForm() {
           <button
             type="button"
             onClick={() => setShowPassword((visible) => !visible)}
-            className="absolute end-2 top-1/2 -translate-y-1/2 rounded-md p-1 text-muted-foreground hover:text-foreground"
+            className="absolute end-1 top-1/2 flex size-8 -translate-y-1/2 items-center justify-center rounded-lg text-muted-foreground hover:bg-muted hover:text-foreground"
             aria-label={showPassword ? ar.hidePassword : ar.showPassword}
             aria-pressed={showPassword}
           >
@@ -104,10 +104,24 @@ export function LoginForm() {
       {needsTotp && (
         <div>
           <Label htmlFor="totp">{ar.totpCode}</Label>
-          <Input id="totp" value={totp} onChange={(e) => setTotp(e.target.value)} placeholder={ar.totpCode} />
+          <Input
+            id="totp"
+            inputMode="numeric"
+            autoComplete="one-time-code"
+            dir="ltr"
+            className="text-start"
+            value={totp}
+            onChange={(e) => setTotp(e.target.value)}
+            placeholder={ar.totpCode}
+            autoFocus
+          />
         </div>
       )}
-      {error && <p className="text-sm text-danger">{error}</p>}
+      {error && (
+        <p role="alert" className="rounded-xl bg-danger-soft px-3 py-2 text-sm text-danger">
+          {error}
+        </p>
+      )}
       <Button type="submit" className="w-full" loading={loading}>
         {loading ? ar.loading : needsTotp ? ar.verify : ar.login}
       </Button>

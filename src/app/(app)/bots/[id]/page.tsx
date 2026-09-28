@@ -1,15 +1,45 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import Link from "next/link";
 import { useParams } from "next/navigation";
+import {
+  Bot as BotIcon,
+  ChevronLeft,
+  MessageSquareText,
+  Pencil,
+  Plus,
+  RefreshCw,
+  Trash2,
+  Upload,
+} from "lucide-react";
 import { ar } from "@/i18n/ar";
-import { Button } from "@/components/ui/button";
+import { Button, buttonClass } from "@/components/ui/button";
 import { Dialog } from "@/components/ui/dialog";
-import { Input } from "@/components/ui/input";
+import { Input, Select, Textarea } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Badge } from "@/components/ui/badge";
+import { Card, CardHeader } from "@/components/ui/card";
 import { useToast } from "@/components/ui/toast";
-import type { FieldType, RequestField } from "@/types";
+import { TelegramMessageComposer } from "@/components/telegram/telegram-message-composer";
+import { defaultWelcomeText } from "@/lib/telegram/welcome-prompt";
+import { cn } from "@/lib/utils";
+import type { FieldType, RequestField, TelegramPromptBlock } from "@/types";
 import { nextFieldName } from "@/lib/requests/field-names";
+import type { BranchingRule } from "@/lib/requests/branching";
+import { canMoveField, fieldsOnlyPayload, moveField, sortFieldsByOrder } from "@/lib/requests/field-order";
+import { OptionsEditor } from "@/components/requests/options-editor";
+import { FieldMoveButtons } from "@/components/requests/dynamic-fields-editor";
+
+type BotRequestType = {
+  id: string;
+  name: string;
+  slug: string;
+  active: boolean;
+  fields: RequestField[];
+  branchingRules?: BranchingRule[];
+  telegramGroupId?: string | null;
+};
 
 const FIELD_TYPES: FieldType[] = [
   "TEXT",
@@ -28,6 +58,7 @@ const FIELD_TYPES: FieldType[] = [
   "IMAGE",
   "INSTRUCTION",
   "CONFIRMATION",
+  "DYNAMIC",
 ];
 
 export default function BotDetailPage() {
@@ -53,12 +84,14 @@ export default function BotDetailPage() {
   const [savingFields, setSavingFields] = useState(false);
   const [activating, setActivating] = useState<string | null>(null);
   const [requestName, setRequestName] = useState("");
-  const [requests, setRequests] = useState<
-    { id: string; name: string; slug: string; active: boolean; fields: RequestField[]; telegramGroupId?: string | null }[]
-  >([]);
+  const [requests, setRequests] = useState<BotRequestType[]>([]);
   const [groups, setGroups] = useState<{ id: string; title: string; chatId?: number; messageThreadId?: number | null }[]>([]);
   const [selected, setSelected] = useState<string | null>(null);
   const [fields, setFields] = useState<RequestField[]>([]);
+  const [welcomeBlocks, setWelcomeBlocks] = useState<TelegramPromptBlock[]>([]);
+  const [savingWelcome, setSavingWelcome] = useState(false);
+  /** Reloads triggered by unrelated actions must not discard an in-progress composition. */
+  const welcomeLoaded = useRef(false);
 
   async function load() {
     const [b, r, g] = await Promise.all([
@@ -73,10 +106,15 @@ export default function BotDetailPage() {
     if (bj.bot) {
       setEditName(bj.bot.name ?? "");
       setEditDetails(bj.bot.details ?? "");
+      if (!welcomeLoaded.current) {
+        welcomeLoaded.current = true;
+        setWelcomeBlocks(bj.bot.welcomePrompt?.blocks ?? []);
+      }
     }
-    const mine = (rj.requestTypes ?? []).filter((x: { botId: string }) => x.botId === id);
+    const mine = (rj.requestTypes ?? []).filter((x: { botId: string }) => x.botId === id) as BotRequestType[];
     setRequests(mine);
     setGroups(gj.groups ?? []);
+    return mine;
   }
 
   useEffect(() => {
@@ -107,6 +145,23 @@ export default function BotDetailPage() {
     toast(ar.botUpdated);
     setEditOpen(false);
     load();
+  }
+
+  async function saveWelcome() {
+    setSavingWelcome(true);
+    const res = await fetch(`/api/bots/${id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ welcomePrompt: welcomeBlocks.length ? { blocks: welcomeBlocks } : null }),
+    });
+    setSavingWelcome(false);
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      toast(typeof data.error === "string" ? `${ar.saveFailed}: ${data.error}` : ar.saveFailed, "error");
+      return;
+    }
+    setWelcomeBlocks(data.bot?.welcomePrompt?.blocks ?? []);
+    toast(ar.welcomeMessageSaved);
   }
 
   async function deleteBot() {
@@ -169,11 +224,18 @@ export default function BotDetailPage() {
     const res = await fetch(`/api/request-types/${selected}/fields`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ fields }),
+      body: JSON.stringify(fieldsOnlyPayload(fields)),
     });
     setSavingFields(false);
-    toast(res.ok ? ar.fieldsSaved : ar.saveFailed);
-    load();
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      toast(typeof err.error === "string" ? `${ar.saveFailed}: ${err.error}` : ar.saveFailed, "error");
+      return;
+    }
+    toast(ar.fieldsSaved);
+    const mine = await load();
+    const fresh = mine?.find((r) => r.id === selected);
+    if (fresh) setFields(sortFieldsByOrder(fresh.fields ?? []));
   }
 
   async function activate(requestId: string, active: boolean) {
@@ -189,126 +251,203 @@ export default function BotDetailPage() {
   }
 
   const selectedRt = requests.find((r) => r.id === selected);
+  const activeTypeNames = requests.filter((r) => r.active).map((r) => r.name);
 
   return (
-    <div className="space-y-6">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <h1 className="text-2xl font-bold">{bot?.name ?? "..."}</h1>
-          <p className="text-sm text-muted-foreground">
-            @{bot?.username} · {bot?.status}
-          </p>
+    <div className="space-y-5">
+      <Card className="p-4 sm:p-5">
+        <nav aria-label="breadcrumb" className="mb-3 flex items-center gap-1 text-xs text-muted-foreground">
+          <Link href="/bots" className="hover:text-foreground hover:underline">
+            {ar.bots}
+          </Link>
+          <ChevronLeft className="size-3.5" aria-hidden />
+          <span className="truncate text-foreground">{bot?.name ?? "…"}</span>
+        </nav>
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div className="flex min-w-0 items-center gap-3">
+            <div className="flex size-12 shrink-0 items-center justify-center overflow-hidden rounded-xl bg-primary-soft">
+              {bot?.logoFileId ? (
+                // eslint-disable-next-line @next/next/no-img-element
+                <img src={`/api/files/${bot.logoFileId}`} alt="" className="size-full object-cover" />
+              ) : (
+                <BotIcon className="size-6 text-primary" />
+              )}
+            </div>
+            <div className="min-w-0">
+              <div className="flex flex-wrap items-center gap-2">
+                <h1 className="text-xl font-semibold tracking-tight">{bot?.name ?? "…"}</h1>
+                {bot ? (
+                  <Badge tone={bot.status === "RUNNING" ? "success" : bot.status === "ERROR" ? "danger" : "neutral"} dot>
+                    {bot.status === "RUNNING" ? ar.botRunning : bot.status === "ERROR" ? ar.botError : ar.botStopped}
+                  </Badge>
+                ) : null}
+              </div>
+              {bot ? (
+                <p className="text-sm text-muted-foreground">
+                  <span dir="ltr">@{bot.username}</span>
+                </p>
+              ) : null}
+            </div>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <Button type="button" variant="outline" size="sm" onClick={() => setEditOpen(true)}>
+              <Pencil className="size-3.5" />
+              {ar.editBot}
+            </Button>
+            <Button type="button" variant="ghost" size="sm" loading={syncing} onClick={syncTelegram}>
+              <RefreshCw className="size-3.5" />
+              {ar.syncTelegram}
+            </Button>
+            <Button type="button" variant="danger-ghost" size="sm" loading={deletingBot} onClick={deleteBot}>
+              <Trash2 className="size-3.5" />
+              {ar.deleteBot}
+            </Button>
+          </div>
         </div>
-        <div className="flex flex-wrap gap-2">
-          <Button type="button" variant="outline" onClick={() => setEditOpen(true)}>
-            {ar.editBot}
-          </Button>
-          <Button type="button" variant="secondary" loading={syncing} onClick={syncTelegram}>
-            {ar.syncTelegram}
-          </Button>
-          <Button type="button" variant="danger" loading={deletingBot} onClick={deleteBot}>
-            {ar.deleteBot}
-          </Button>
-        </div>
-      </div>
-      <Dialog open={editOpen} onOpenChange={setEditOpen} title={ar.editBot}>
-        <form onSubmit={saveBot} className="space-y-3">
+      </Card>
+      <Dialog
+        open={editOpen}
+        onOpenChange={setEditOpen}
+        title={ar.editBot}
+        footer={
+          <>
+            <Button type="submit" form="edit-bot-form" loading={savingBot}>
+              {savingBot ? ar.loading : ar.save}
+            </Button>
+            <Button type="button" variant="outline" onClick={() => setEditOpen(false)}>
+              {ar.cancel}
+            </Button>
+          </>
+        }
+      >
+        <form id="edit-bot-form" onSubmit={saveBot} className="space-y-4">
           <div>
             <Label>{ar.botLogo}</Label>
-            <div className="mt-1 flex items-center gap-3">
-              <div className="flex size-16 items-center justify-center overflow-hidden rounded-2xl bg-muted">
+            <div className="flex items-center gap-3">
+              <div className="flex size-16 items-center justify-center overflow-hidden rounded-2xl border border-border bg-muted">
                 {bot?.logoFileId ? (
                   // eslint-disable-next-line @next/next/no-img-element
                   <img src={`/api/files/${bot.logoFileId}`} alt="" className="size-full object-cover" />
                 ) : (
-                  <span className="text-xs text-muted-foreground">—</span>
+                  <BotIcon className="size-6 text-muted-foreground" />
                 )}
               </div>
-              <label className="cursor-pointer text-sm text-primary">
+              <label className={buttonClass("outline", "sm", "cursor-pointer")}>
+                <Upload className="size-3.5" />
                 {ar.chooseLogo}
                 <input
                   type="file"
                   accept="image/png,image/jpeg,image/webp"
-                  className="hidden"
+                  className="sr-only"
                   onChange={(e) => setLogoFile(e.target.files?.[0] ?? null)}
                 />
               </label>
             </div>
-            {logoFile ? <div className="mt-1 text-xs text-muted-foreground">{logoFile.name}</div> : null}
+            {logoFile ? <div className="mt-1.5 text-xs text-muted-foreground">{logoFile.name}</div> : null}
           </div>
           <div>
-            <Label>{ar.name}</Label>
-            <Input value={editName} onChange={(e) => setEditName(e.target.value)} required />
+            <Label htmlFor="edit-bot-name">{ar.name}</Label>
+            <Input id="edit-bot-name" value={editName} onChange={(e) => setEditName(e.target.value)} required />
           </div>
           <div>
-            <Label>{ar.botDescription}</Label>
-            <textarea
-              value={editDetails}
-              onChange={(e) => setEditDetails(e.target.value)}
-              rows={4}
-              className="w-full rounded-xl border border-border bg-card px-3 py-2 text-sm outline-none ring-primary/30 focus:ring-2"
-            />
-          </div>
-          <div className="flex justify-end gap-2 pt-2">
-            <Button type="button" variant="outline" onClick={() => setEditOpen(false)}>
-              {ar.cancel}
-            </Button>
-            <Button type="submit" loading={savingBot}>
-              {savingBot ? ar.loading : ar.save}
-            </Button>
+            <Label htmlFor="edit-bot-details">{ar.botDescription}</Label>
+            <Textarea id="edit-bot-details" value={editDetails} onChange={(e) => setEditDetails(e.target.value)} rows={4} />
           </div>
         </form>
       </Dialog>
-      <Dialog open={createRequestOpen} onOpenChange={setCreateRequestOpen} title={ar.createRequest}>
-        <form onSubmit={createRequest} className="space-y-3">
-          <div>
-            <Label>{ar.name}</Label>
-            <Input value={requestName} onChange={(e) => setRequestName(e.target.value)} required />
-          </div>
-          <div className="flex justify-end gap-2 pt-2">
+      <Dialog
+        open={createRequestOpen}
+        onOpenChange={setCreateRequestOpen}
+        title={ar.createRequest}
+        footer={
+          <>
+            <Button type="submit" form="create-type-form" loading={creatingRequest}>
+              {creatingRequest ? ar.loading : ar.create}
+            </Button>
             <Button type="button" variant="outline" onClick={() => setCreateRequestOpen(false)}>
               {ar.cancel}
             </Button>
-            <Button type="submit" loading={creatingRequest}>
-              {creatingRequest ? ar.loading : ar.create}
-            </Button>
+          </>
+        }
+      >
+        <form id="create-type-form" onSubmit={createRequest} className="space-y-4">
+          <div>
+            <Label htmlFor="create-type-name">{ar.name}</Label>
+            <Input id="create-type-name" value={requestName} onChange={(e) => setRequestName(e.target.value)} required />
           </div>
         </form>
       </Dialog>
+      <Card className="p-4 sm:p-5">
+        <CardHeader
+          icon={<MessageSquareText className="size-4" />}
+          title={ar.welcomeMessage}
+          description={ar.welcomeMessageDescription}
+          actions={
+            <div className="flex flex-wrap gap-2">
+              {welcomeBlocks.length ? (
+                <Button type="button" variant="outline" size="sm" onClick={() => setWelcomeBlocks([])}>
+                  {ar.welcomeMessageReset}
+                </Button>
+              ) : null}
+              <Button type="button" size="sm" loading={savingWelcome} onClick={saveWelcome}>
+                {savingWelcome ? ar.loading : ar.save}
+              </Button>
+            </div>
+          }
+        />
+        <div className="mt-4">
+          <TelegramMessageComposer
+            ownerId={id}
+            blocks={welcomeBlocks}
+            onChange={setWelcomeBlocks}
+            fallbackLabel={defaultWelcomeText(activeTypeNames.length > 0)}
+            title={ar.welcomeMessage}
+            subtitle={ar.welcomeMessageSubtitle}
+            emptyHint={ar.welcomeMessageEmpty}
+            buttons={[...activeTypeNames, "📋 شكاواي", "ℹ️ المساعدة"]}
+          />
+        </div>
+      </Card>
       <div className="grid gap-4 xl:grid-cols-[280px_1fr_280px]">
-        <div className="space-y-2 rounded-2xl border border-border bg-card p-3">
-          <div className="flex items-center justify-between gap-2">
-            <div className="font-semibold">{ar.requests}</div>
-            <Button type="button" variant="outline" className="px-3 py-1 text-xs" onClick={() => setCreateRequestOpen(true)}>
+        <Card className="space-y-1 self-start p-3">
+          <div className="mb-2 flex items-center justify-between gap-2 px-1">
+            <div className="text-sm font-semibold">{ar.requests}</div>
+            <Button type="button" variant="outline" size="sm" onClick={() => setCreateRequestOpen(true)}>
+              <Plus className="size-3.5" />
               {ar.create}
             </Button>
           </div>
           {requests.map((r) => (
             <button
+              type="button"
               key={r.id}
-              className={`block w-full rounded-xl px-3 py-2 text-start text-sm ${selected === r.id ? "bg-primary text-primary-foreground" : "hover:bg-muted"}`}
+              aria-pressed={selected === r.id}
+              className={cn(
+                "flex w-full items-center justify-between gap-2 rounded-xl px-3 py-2 text-start text-sm transition-colors",
+                selected === r.id ? "bg-primary-soft font-medium text-primary" : "hover:bg-muted",
+              )}
               onClick={() => {
                 setSelected(r.id);
-                setFields(r.fields ?? []);
+                setFields(sortFieldsByOrder(r.fields ?? []));
               }}
             >
-              {r.name}
-              <div className="text-xs opacity-80">{r.active ? ar.activated : ar.deactivated}</div>
+              <span className="truncate">{r.name}</span>
+              <Badge tone={r.active ? "success" : "neutral"}>{r.active ? ar.activated : ar.deactivated}</Badge>
             </button>
           ))}
-        </div>
-        <div className="rounded-2xl border border-border bg-card p-4">
+        </Card>
+        <Card className="p-4">
           <div className="mb-3 flex items-center justify-between">
-            <div className="font-semibold">{ar.builder}</div>
-            <Button type="button" variant="outline" onClick={addField}>
+            <div className="text-sm font-semibold">{ar.builder}</div>
+            <Button type="button" variant="outline" size="sm" onClick={addField}>
+              <Plus className="size-3.5" />
               {ar.addField}
             </Button>
           </div>
           {selected && (
             <div className="mb-4">
               <Label>{ar.groups}</Label>
-              <select
-                className="mt-1 w-full rounded-xl border border-border bg-card px-3 py-2 text-sm"
+              <Select
                 value={selectedRt?.telegramGroupId ?? ""}
                 onChange={async (e) => {
                   const res = await fetch(`/api/request-types/${selected}`, {
@@ -329,93 +468,85 @@ export default function BotDetailPage() {
                     {g.chatId ? ")" : ""}
                   </option>
                 ))}
-              </select>
+              </Select>
             </div>
           )}
           <div className="space-y-3">
             {fields.map((f, idx) => (
-              <div key={f.id} className="grid gap-2 rounded-xl border border-border p-3 md:grid-cols-2">
-                <Input
-                  value={f.label}
-                  onChange={(e) =>
-                    setFields((all) => all.map((x, i) => (i === idx ? { ...x, label: e.target.value } : x)))
-                  }
-                  placeholder={ar.displayName}
-                />
-                <Input
-                  value={f.name}
-                  onChange={(e) =>
-                    setFields((all) => all.map((x, i) => (i === idx ? { ...x, name: e.target.value } : x)))
-                  }
-                  placeholder={ar.name}
-                />
-                <select
-                  className="rounded-xl border border-border bg-card px-3 py-2 text-sm"
-                  value={f.type}
-                  onChange={(e) =>
-                    setFields((all) =>
-                      all.map((x, i) =>
-                        i === idx
-                          ? {
-                              ...x,
-                              type: e.target.value as FieldType,
-                            }
-                          : x,
-                      ),
-                    )
-                  }
-                >
-                  {FIELD_TYPES.map((t) => (
-                    <option key={t} value={t}>
-                      {ar.fieldTypes[t]}
-                    </option>
-                  ))}
-                </select>
-                <Input
-                  value={f.telegramMessage ?? ""}
-                  onChange={(e) =>
-                    setFields((all) => all.map((x, i) => (i === idx ? { ...x, telegramMessage: e.target.value } : x)))
-                  }
-                  placeholder="رسالة Telegram"
-                />
-                {(f.type === "SELECT" || f.type === "RADIO" || f.type === "CHECKBOX") && (
+              <div key={f.id} className="flex items-start gap-1.5 rounded-xl border border-border bg-muted/20 p-3">
+                <div className="grid min-w-0 flex-1 gap-2 md:grid-cols-2">
                   <Input
-                    className="md:col-span-2"
-                    value={(f.options ?? []).map((o) => o.label).join(", ")}
+                    value={f.label}
+                    onChange={(e) =>
+                      setFields((all) => all.map((x, i) => (i === idx ? { ...x, label: e.target.value } : x)))
+                    }
+                    placeholder={ar.displayName}
+                  />
+                  <Input
+                    value={f.name}
+                    onChange={(e) =>
+                      setFields((all) => all.map((x, i) => (i === idx ? { ...x, name: e.target.value } : x)))
+                    }
+                    placeholder={ar.name}
+                  />
+                  <Select
+                    aria-label={ar.type}
+                    value={f.type}
                     onChange={(e) =>
                       setFields((all) =>
-                        all.map((x, i) =>
-                          i === idx
-                            ? {
-                                ...x,
-                                options: e.target.value
-                                  .split(",")
-                                  .map((s) => s.trim())
-                                  .filter(Boolean)
-                                  .map((label) => ({ label, value: label })),
-                              }
-                            : x,
-                        ),
+                        all.map((x, i) => (i === idx ? { ...x, type: e.target.value as FieldType } : x)),
                       )
                     }
-                    placeholder={ar.optionsHint}
-                  />
-                )}
-                <label className="flex items-center gap-2 text-sm">
-                  <input
-                    type="checkbox"
-                    checked={f.required}
+                  >
+                    {FIELD_TYPES.map((t) => (
+                      <option key={t} value={t}>
+                        {ar.fieldTypes[t]}
+                      </option>
+                    ))}
+                  </Select>
+                  <Input
+                    value={f.telegramMessage ?? ""}
+                    readOnly={Boolean(f.telegramPrompt)}
+                    title={f.telegramPrompt ? "هذه الرسالة مُركّبة من عدة عناصر — عدّلها من صفحة أنواع الشكاوى." : undefined}
                     onChange={(e) =>
-                      setFields((all) => all.map((x, i) => (i === idx ? { ...x, required: e.target.checked } : x)))
+                      setFields((all) => all.map((x, i) => (i === idx ? { ...x, telegramMessage: e.target.value } : x)))
                     }
+                    placeholder="رسالة Telegram"
                   />
-                  {ar.required}
-                </label>
+                  {(f.type === "SELECT" || f.type === "RADIO" || f.type === "CHECKBOX") && (
+                    <div className="md:col-span-2">
+                      <OptionsEditor
+                        field={f}
+                        rules={selectedRt?.branchingRules ?? []}
+                        onChange={(options) =>
+                          setFields((all) => all.map((x, i) => (i === idx ? { ...x, options } : x)))
+                        }
+                      />
+                    </div>
+                  )}
+                  <label className="flex items-center gap-2 text-sm">
+                    <input
+                      type="checkbox"
+                      className="size-4 accent-primary"
+                      checked={f.required}
+                      onChange={(e) =>
+                        setFields((all) => all.map((x, i) => (i === idx ? { ...x, required: e.target.checked } : x)))
+                      }
+                    />
+                    {ar.required}
+                  </label>
+                </div>
+                <FieldMoveButtons
+                  index={idx}
+                  canUp={canMoveField(fields, idx, -1)}
+                  canDown={canMoveField(fields, idx, 1)}
+                  onMove={(direction) => setFields((all) => moveField(all, idx, direction))}
+                />
               </div>
             ))}
           </div>
           {selected && (
-            <div className="mt-4 flex flex-wrap gap-2">
+            <div className="mt-4 flex flex-wrap gap-2 border-t border-border pt-4">
               <Button onClick={saveFields} loading={savingFields}>
                 {savingFields ? ar.loading : ar.save}
               </Button>
@@ -427,9 +558,9 @@ export default function BotDetailPage() {
               </Button>
             </div>
           )}
-        </div>
-        <div className="rounded-2xl border border-border bg-card p-4">
-          <div className="mb-3 font-semibold">{ar.preview}</div>
+        </Card>
+        <Card className="self-start p-4">
+          <div className="mb-3 text-sm font-semibold">{ar.preview}</div>
           <div className="mx-auto max-w-[240px] rounded-[1.75rem] border-4 border-secondary bg-[#0e1621] p-3 text-sm text-white shadow-lg">
             <div className="mb-3 text-center text-xs text-white/60">Telegram</div>
             <div className="space-y-2">
@@ -450,7 +581,7 @@ export default function BotDetailPage() {
               {fields.length === 0 && <div className="text-center text-xs text-white/50">—</div>}
             </div>
           </div>
-        </div>
+        </Card>
       </div>
     </div>
   );

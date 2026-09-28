@@ -4,6 +4,7 @@ import { errorToResponse, withAuth } from "@/lib/api/http";
 import { collections, getDb } from "@/lib/db/client";
 import { OrderService } from "@/lib/orders/order-service";
 import { parseFieldAnswer } from "@/lib/orders/field-answer";
+import { orderFieldDefinitions } from "@/lib/orders/order-field-rows";
 import { GridFSStorageService } from "@/lib/storage/gridfs";
 import { fileHttpResponse } from "@/lib/storage/file-response";
 import { resolveUploadMime } from "@/lib/storage/mime";
@@ -31,7 +32,9 @@ export async function GET(req: Request, ctx: Ctx) {
     const request = await db.collection(collections.requestTypes).findOne({
       _id: new ObjectId(String(order.requestTypeId)),
     });
-    const fieldDef = ((request?.fields as RequestField[]) ?? []).find((f) => f.name === field);
+    const fieldDef = orderFieldDefinitions(order, (request?.fields as RequestField[]) ?? []).find(
+      (f) => f.name === field,
+    );
     const answer = parseFieldAnswer(values[field], fieldDef?.type);
 
     if (!answer.gridFsId && !answer.telegramFileId) throw new Error("NOT_FOUND");

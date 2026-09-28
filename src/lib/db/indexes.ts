@@ -54,6 +54,23 @@ export async function ensureIndexes() {
   await db.collection(collections.notifications).createIndexes([
     { key: { recipientUserId: 1, read: 1, createdAt: -1 } },
     { key: { createdAt: -1 } },
+    { key: { recipientUserId: 1, createdAt: -1 } },
+    { key: { eventKey: 1, recipientUserId: 1, createdAt: -1 } },
+  ]);
+
+  await db.collection(collections.notificationOutbox).createIndexes([
+    { key: { status: 1, updatedAt: 1 } },
+    { key: { notificationId: 1 } },
+  ]);
+
+  await db.collection(collections.orderStatusHistory).createIndexes([
+    { key: { orderId: 1, createdAt: -1 } },
+  ]);
+
+  await db.collection(collections.requestTypes).createIndexes([
+    { key: { slug: 1 }, unique: true, sparse: true },
+    { key: { botId: 1, active: 1 } },
+    { key: { archivedAt: 1, createdAt: -1 } },
   ]);
 
   await db.collection(collections.pushSubscriptions).createIndexes([

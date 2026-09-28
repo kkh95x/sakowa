@@ -4,7 +4,7 @@ import { encrypt } from "@/lib/security/crypto";
 import { audit } from "@/lib/audit/audit";
 import { randomToken } from "@/lib/security/crypto";
 import { telegramBotCall } from "@/lib/telegram/api";
-import type { BotStatus } from "@/types";
+import type { BotStatus, TelegramPrompt } from "@/types";
 
 export type BotLastMessage = {
   text: string;
@@ -27,6 +27,12 @@ function serializeLastMessage(value: unknown): BotLastMessage | null {
   };
 }
 
+/** Bots saved before the welcome composer simply have no `welcomePrompt`. */
+function serializeWelcomePrompt(value: unknown): TelegramPrompt | null {
+  const blocks = (value as TelegramPrompt | null | undefined)?.blocks;
+  return Array.isArray(blocks) && blocks.length ? { blocks } : null;
+}
+
 export function serializeBot(b: Record<string, unknown>) {
   return {
     id: String(b._id),
@@ -36,6 +42,7 @@ export function serializeBot(b: Record<string, unknown>) {
     telegramBotId: b.telegramBotId,
     details: typeof b.details === "string" ? b.details : "",
     logoFileId: b.logoFileId ? String(b.logoFileId) : null,
+    welcomePrompt: serializeWelcomePrompt(b.welcomePrompt),
     lastMessage: serializeLastMessage(b.lastMessage),
     createdAt: b.createdAt,
     updatedAt: b.updatedAt,
@@ -101,7 +108,14 @@ export class BotService {
 
   static async update(
     id: string,
-    params: { name?: string; details?: string; logoFileId?: string; actorId: string },
+    params: {
+      name?: string;
+      details?: string;
+      logoFileId?: string;
+      /** `null` (or an empty composition) restores the default welcome message. */
+      welcomePrompt?: TelegramPrompt | null;
+      actorId: string;
+    },
   ) {
     const db = await getDb();
     const before = await db.collection(collections.bots).findOne(
@@ -112,6 +126,10 @@ export class BotService {
     if (params.name !== undefined) $set.name = params.name;
     if (params.details !== undefined) $set.details = params.details;
     if (params.logoFileId !== undefined) $set.logoFileId = params.logoFileId;
+    if (params.welcomePrompt !== undefined) {
+      const blocks = params.welcomePrompt?.blocks ?? [];
+      $set.welcomePrompt = blocks.length ? ({ blocks } satisfies TelegramPrompt) : null;
+    }
     await db.collection(collections.bots).updateOne({ _id: new ObjectId(id) }, { $set });
     await audit({
       actorUserId: params.actorId,

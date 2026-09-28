@@ -11,7 +11,24 @@ import { persistOrderFieldFiles } from "@/lib/orders/persist-order-files";
 import { ensureUniqueFieldNames } from "@/lib/requests/field-names";
 import { ChatLogService } from "@/lib/chat/chat-log-service";
 import { fieldAnswerLabel, parseFieldAnswer, displayChoice } from "@/lib/orders/field-answer";
-import { emptyAdminFields, parseAdminFields } from "@/lib/orders/admin-fields";
+import { adminFieldsSet, emptyAdminFields, parseAdminFields } from "@/lib/orders/admin-fields";
+import {
+  canTransition,
+  complaintStatusLabel,
+  emptyStatusCounts,
+  accumulateStatusCount,
+  formatComplaintNumber,
+  parseComplaintSeq,
+  statusChangeNotificationMessage,
+  statusMongoQuery,
+  validateStatusChange,
+} from "@/lib/orders/complaint-status";
+import {
+  pruneHiddenAnswers,
+  validateVisibleAnswers,
+  type BranchingRule,
+} from "@/lib/requests/branching";
+import { formFieldsForOrder, orderFieldDefinitions } from "@/lib/orders/order-field-rows";
 import type { OrderAdminFields, OrderFilter, OrderStatus, RequestField } from "@/types";
 
 function peerKeys(value: unknown) {
@@ -39,17 +56,9 @@ function tryDecryptStored(value: string): string {
   }
 }
 
-const TRANSITIONS: Record<OrderStatus, OrderStatus[]> = {
-  PENDING: ["REVIEWING", "REJECTED", "ARCHIVED"],
-  REVIEWING: ["COMPLETED", "REJECTED", "ARCHIVED"],
-  COMPLETED: ["ARCHIVED"],
-  REJECTED: ["ARCHIVED"],
-  ARCHIVED: [],
-};
-
 export class OrderStatusService {
   static canTransition(from: OrderStatus, to: OrderStatus) {
-    return TRANSITIONS[from]?.includes(to) ?? false;
+    return canTransition(from, to);
   }
 }
 
@@ -62,7 +71,7 @@ export class OrderService {
       { upsert: true, returnDocument: "after" },
     );
     const seq = Number(result?.seq ?? 1);
-    return `ORD-${String(seq).padStart(5, "0")}`;
+    return formatComplaintNumber(seq);
   }
 
   /**
@@ -79,7 +88,7 @@ export class OrderService {
       .limit(1)
       .toArray();
 
-    const highest = Number(String(latest?.orderNumber ?? "").replace(/\D/g, "")) || 0;
+    const highest = parseComplaintSeq(latest?.orderNumber);
     await db.collection(collections.orderCounters).updateOne(
       { key: "global" },
       { $max: { seq: highest } },
@@ -97,14 +106,8 @@ export class OrderService {
         { $group: { _id: "$status", count: { $sum: 1 } } },
       ])
       .toArray();
-    const map: Record<string, number> = {
-      PENDING: 0,
-      REVIEWING: 0,
-      COMPLETED: 0,
-      REJECTED: 0,
-      ARCHIVED: 0,
-    };
-    for (const row of rows) map[String(row._id)] = row.count;
+    const map = emptyStatusCounts() as Record<string, number>;
+    for (const row of rows) accumulateStatusCount(map, row._id, Number(row.count) || 0);
     return map;
   }
 
@@ -124,7 +127,7 @@ export class OrderService {
     const filterQuery = OrderFilterBuilder.build(params.filters ?? []);
     const query: Record<string, unknown> = {
       requestTypeId: params.requestTypeId,
-      status: params.status,
+      status: statusMongoQuery(params.status),
       ...filterQuery,
     };
     if (params.search) {
@@ -179,18 +182,9 @@ export class OrderService {
         { $group: { _id: "$status", count: { $sum: 1 } } },
       ])
       .toArray();
-    const map: Record<OrderStatus, number> = {
-      PENDING: 0,
-      REVIEWING: 0,
-      COMPLETED: 0,
-      REJECTED: 0,
-      ARCHIVED: 0,
-    };
-    for (const row of rows) {
-      const key = String(row._id) as OrderStatus;
-      if (key in map) map[key] = Number(row.count) || 0;
-    }
-    return map;
+    const map = emptyStatusCounts() as Record<string, number>;
+    for (const row of rows) accumulateStatusCount(map, row._id, Number(row.count) || 0);
+    return map as Record<OrderStatus, number>;
   }
 
   static async listUserServices(telegramUserId: number) {
@@ -243,7 +237,7 @@ export class OrderService {
         botId: params.botId,
         requestTypeId: params.requestTypeId,
       }),
-      status: params.status,
+      status: statusMongoQuery(params.status),
     };
     const [items, total] = await Promise.all([
       db
@@ -258,6 +252,11 @@ export class OrderService {
     return { items, total, page, pageSize };
   }
 
+  /** Rows for showing a submitted complaint to its Telegram user. */
+  static summarizeSubmittedAnswers(order: Record<string, unknown>, liveFields: RequestField[]) {
+    return this.summarizeFields(order, orderFieldDefinitions(order, liveFields));
+  }
+
   static summarizeFields(order: Record<string, unknown>, fields: RequestField[]) {
     const values = (order.fields as Record<string, unknown>) ?? {};
     const defs = [...fields]
@@ -266,7 +265,7 @@ export class OrderService {
     const rows: {
       label: string;
       value: string;
-      kind: "text" | "file" | "image";
+      kind: "text" | "file" | "image" | "audio" | "video" | "location" | "contact" | "other";
       fieldName: string;
       gridFsId: string | null;
       telegramFileId: string | null;
@@ -300,7 +299,16 @@ export class OrderService {
       rows.push({
         label: field.label || field.name,
         value,
-        kind: answer.kind === "image" ? "image" : answer.kind === "file" ? "file" : "text",
+        kind:
+          answer.kind === "image" ||
+          answer.kind === "file" ||
+          answer.kind === "audio" ||
+          answer.kind === "video" ||
+          answer.kind === "location" ||
+          answer.kind === "contact" ||
+          answer.kind === "other"
+            ? answer.kind
+            : "text",
         fieldName: field.name,
         gridFsId: answer.gridFsId ?? null,
         telegramFileId: answer.telegramFileId ?? null,
@@ -338,6 +346,9 @@ export class OrderService {
     telegramName?: string;
     fields: Record<string, unknown>;
     attachments?: string[];
+    /** Form the answers were collected against; defaults to the live request type. */
+    fieldDefs?: RequestField[];
+    branchingRules?: BranchingRule[];
   }) {
     const db = await getDb();
     const initialOrderNumber = await this.nextNumber();
@@ -347,12 +358,19 @@ export class OrderService {
     const request = await db.collection(collections.requestTypes).findOne({
       _id: new ObjectId(params.requestTypeId),
     });
-    const fieldDefs = ensureUniqueFieldNames((request?.fields as RequestField[]) ?? []);
+    const fieldDefs = ensureUniqueFieldNames(params.fieldDefs ?? ((request?.fields as RequestField[]) ?? []));
+    const branchingRules = params.branchingRules ?? (((request?.branchingRules as BranchingRule[]) ?? []) as BranchingRule[]);
+    const validated = validateVisibleAnswers({
+      fields: fieldDefs,
+      rules: branchingRules,
+      answers: params.fields,
+    });
+    if (!validated.ok) throw new Error(validated.error);
     const persisted = await persistOrderFieldFiles({
       botId: params.botId,
       orderId: String(orderId),
       telegramUserId: params.telegramUserId,
-      fields: params.fields,
+      fields: pruneHiddenAnswers(fieldDefs, branchingRules, validated.answers),
       fieldDefs,
     });
     const attachmentIds = [...new Set([...(params.attachments ?? []), ...persisted.attachments])];
@@ -372,6 +390,7 @@ export class OrderService {
           telegramName: params.telegramName ?? null,
           status: "PENDING",
           fields: persisted.fields,
+          formFields: formFieldsForOrder(fieldDefs),
           attachments: attachmentIds,
           adminFields: emptyAdminFields(),
           createdAt: now,
@@ -574,44 +593,64 @@ export class OrderService {
     actorId: string;
     message?: string;
     attachmentFileId?: string;
+    reason?: string;
+    resolutionNote?: string;
+    closingNote?: string;
   }) {
     const db = await getDb();
     const order = await this.get(params.orderId);
     if (!order) throw new Error("NOT_FOUND");
-    const from = order.status as OrderStatus;
-    if (!OrderStatusService.canTransition(from, params.next)) {
-      throw new Error("INVALID_TRANSITION");
-    }
+    const checked = validateStatusChange({
+      from: order.status,
+      to: params.next,
+      reason: params.reason,
+      resolutionNote: params.resolutionNote,
+      closingNote: params.closingNote,
+    });
+    if (!checked.ok) throw new Error(checked.code);
+    const { from, to: next, context } = checked;
+    const message = params.message?.trim() || null;
     const now = new Date();
-    await db.collection(collections.orders).updateOne(
-      { _id: new ObjectId(params.orderId) },
+    // Matching on the stored status makes concurrent/double submissions lose instead of duplicating history.
+    const updated = await db.collection(collections.orders).updateOne(
+      { _id: new ObjectId(params.orderId), status: order.status },
       {
         $set: {
-          status: params.next,
+          status: next,
           updatedAt: now,
           lastUpdatedBy: params.actorId,
-          ...(params.next === "ARCHIVED" ? { archivedAt: now } : {}),
+          ...(next === "CLOSED" ? { archivedAt: now } : {}),
           ...(params.attachmentFileId
             ? { attachments: [...((order.attachments as string[]) ?? []), params.attachmentFileId] }
             : {}),
         },
       },
     );
+    if (!updated.matchedCount) throw new Error("STATUS_CONFLICT");
     await db.collection(collections.orderStatusHistory).insertOne({
       orderId: params.orderId,
       previousStatus: from,
-      newStatus: params.next,
+      newStatus: next,
       changedBy: params.actorId,
-      message: params.message ?? null,
+      message,
       attachmentFileId: params.attachmentFileId ?? null,
+      ...context,
       createdAt: now,
     });
     await audit({
       actorUserId: params.actorId,
       category: "ORDERS",
       action: "ORDER_STATUS_CHANGED",
+      entityType: "complaint",
       entityId: params.orderId,
-      metadata: { from, to: params.next, hasAttachment: Boolean(params.attachmentFileId) },
+      metadata: {
+        orderNumber: order.orderNumber,
+        from,
+        to: next,
+        fromLabel: complaintStatusLabel(from),
+        toLabel: complaintStatusLabel(next),
+        hasAttachment: Boolean(params.attachmentFileId),
+      },
       before: {
         orderNumber: order.orderNumber,
         status: from,
@@ -619,22 +658,27 @@ export class OrderService {
       },
       after: {
         orderNumber: order.orderNumber,
-        status: params.next,
+        status: next,
         lastUpdatedBy: params.actorId,
-        message: params.message ?? null,
+        changedAt: now,
+        message,
+        reason: context.reason ?? null,
+        resolutionNote: context.resolutionNote ?? null,
+        closingNote: context.closingNote ?? null,
         hasAttachment: Boolean(params.attachmentFileId),
       },
     });
-    if (params.next !== "ARCHIVED") {
+    if (next !== "CLOSED") {
       await NotificationService.notifyAdmins({
-        type: "ORDER_STATUS_CHANGED",
-        title: "تحديث طلب",
-        message: `${order.orderNumber}: ${from} → ${params.next}`,
+        type: "COMPLAINT_STATUS_CHANGED",
+        title: "تحديث شكوى",
+        message: statusChangeNotificationMessage({ orderNumber: order.orderNumber, from, to: next, context }),
         orderId: params.orderId,
         requestTypeId: order.requestTypeId,
         botId: order.botId,
-        entityType: "order",
+        entityType: "complaint",
         entityId: params.orderId,
+        eventKey: `COMPLAINT_STATUS_CHANGED:${params.orderId}:${from}:${next}`,
       });
       try {
         await ChatLogService.run(
@@ -642,11 +686,12 @@ export class OrderService {
           async () => {
             await TelegramService.notifyUserStatus(
               order,
-              params.next,
-              params.message,
+              next,
+              message ?? undefined,
               params.attachmentFileId,
+              context.reason,
             );
-            await TelegramService.notifyGroupStatus(order, from, params.next, params.actorId);
+            await TelegramService.notifyGroupStatus(order, from, next, params.actorId);
           },
         );
       } catch {
@@ -655,56 +700,75 @@ export class OrderService {
     }
   }
 
+  /** Status history with the display name of whoever made each change. */
+  static async statusHistory(orderId: string) {
+    const db = await getDb();
+    const rows = await db
+      .collection(collections.orderStatusHistory)
+      .find({ orderId })
+      .sort({ createdAt: 1 })
+      .toArray();
+    const actorIds = [
+      ...new Set(
+        rows
+          .map((row) => String(row.changedBy ?? ""))
+          .filter((id) => ObjectId.isValid(id) && String(new ObjectId(id)) === id),
+      ),
+    ];
+    const users = actorIds.length
+      ? await db
+          .collection(collections.users)
+          .find({ _id: { $in: actorIds.map((id) => new ObjectId(id)) } })
+          .project({ displayName: 1, username: 1 })
+          .toArray()
+      : [];
+    const names = new Map(
+      users.map((u) => [String(u._id), String(u.displayName || u.username || "")]),
+    );
+    return rows.map((row) => ({
+      ...row,
+      changedByName:
+        row.changedBy === "TELEGRAM_USER" ? null : names.get(String(row.changedBy ?? "")) || null,
+    }));
+  }
+
   static async updateAdminFields(params: {
     orderId: string;
     actorId: string;
-    shamCashReceiptNumber?: string;
     adminNotes?: string;
-    invoiceNumber?: string;
-    paymentDate?: string;
-    invoiceFileId?: string | null;
-    invoiceFilename?: string | null;
-    clearInvoice?: boolean;
+    attachmentFileId?: string | null;
+    attachmentFilename?: string | null;
+    clearAttachment?: boolean;
   }) {
     const db = await getDb();
     const order = await this.get(params.orderId);
     if (!order) throw new Error("NOT_FOUND");
     const before = parseAdminFields(order.adminFields);
     const next: OrderAdminFields = {
-      shamCashReceiptNumber:
-        params.shamCashReceiptNumber !== undefined
-          ? parseAdminFields({ shamCashReceiptNumber: params.shamCashReceiptNumber }).shamCashReceiptNumber
-          : before.shamCashReceiptNumber,
       adminNotes:
         params.adminNotes !== undefined
           ? parseAdminFields({ adminNotes: params.adminNotes }).adminNotes
           : before.adminNotes,
-      invoiceNumber:
-        params.invoiceNumber !== undefined
-          ? parseAdminFields({ invoiceNumber: params.invoiceNumber }).invoiceNumber
-          : before.invoiceNumber,
-      paymentDate:
-        params.paymentDate !== undefined
-          ? parseAdminFields({ paymentDate: params.paymentDate }).paymentDate
-          : before.paymentDate,
-      invoiceFileId: before.invoiceFileId,
-      invoiceFilename: before.invoiceFilename,
+      attachmentFileId: before.attachmentFileId,
+      attachmentFilename: before.attachmentFilename,
     };
-    if (params.clearInvoice) {
-      next.invoiceFileId = null;
-      next.invoiceFilename = null;
-    } else if (params.invoiceFileId !== undefined) {
-      next.invoiceFileId = params.invoiceFileId ? String(params.invoiceFileId) : null;
-      next.invoiceFilename = next.invoiceFileId
-        ? String(params.invoiceFilename ?? before.invoiceFilename ?? "").trim() || null
-        : null;
+    if (params.clearAttachment) {
+      next.attachmentFileId = null;
+      next.attachmentFilename = null;
+    } else if (params.attachmentFileId !== undefined) {
+      const parsed = parseAdminFields({
+        attachmentFileId: params.attachmentFileId,
+        attachmentFilename: params.attachmentFilename ?? before.attachmentFilename,
+      });
+      next.attachmentFileId = parsed.attachmentFileId;
+      next.attachmentFilename = parsed.attachmentFilename;
     }
     const now = new Date();
     await db.collection(collections.orders).updateOne(
       { _id: new ObjectId(params.orderId) },
       {
         $set: {
-          adminFields: next,
+          ...adminFieldsSet(order.adminFields, next),
           updatedAt: now,
           lastUpdatedBy: params.actorId,
         },

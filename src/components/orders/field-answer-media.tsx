@@ -192,8 +192,16 @@ export function FieldAnswerMedia({
   );
 
   const canPreview = mediaType === "image" || mediaType === "pdf";
+  const canPlay = mediaType === "audio" || mediaType === "video";
 
-  if (answer.kind !== "file" && answer.kind !== "image") return null;
+  if (
+    answer.kind !== "file" &&
+    answer.kind !== "image" &&
+    answer.kind !== "audio" &&
+    answer.kind !== "video"
+  ) {
+    return null;
+  }
 
   if (!fileUrl) {
     return (
@@ -266,7 +274,7 @@ export function FieldAnswerMedia({
         </div>
       </div>
 
-      {!canPreview && objectUrl ? (
+      {!canPreview && objectUrl && !canPlay ? (
         <div className="mt-2">
           <button
             type="button"
@@ -275,6 +283,16 @@ export function FieldAnswerMedia({
           >
             {ar.download}
           </button>
+        </div>
+      ) : null}
+
+      {canPlay && objectUrl ? (
+        <div className="mt-2">
+          {mediaType === "audio" ? (
+            <audio controls src={objectUrl} className="w-full" />
+          ) : (
+            <video controls src={objectUrl} className="mt-1 w-full rounded-xl" />
+          )}
         </div>
       ) : null}
 

@@ -1,5 +1,8 @@
 import { errorToResponse, json, withAuth } from "@/lib/api/http";
 import { BotService, serializeBot } from "@/lib/bots/bot-service";
+import { telegramPromptSchema } from "@/lib/requests/prompt-schema";
+import { normalizePromptBlocks } from "@/lib/telegram/prompt-storage";
+import { ar } from "@/i18n/ar";
 import { z } from "zod";
 
 type Ctx = { params: Promise<{ id: string }> };
@@ -19,6 +22,7 @@ export async function GET(_req: Request, ctx: Ctx) {
 const patchSchema = z.object({
   name: z.string().min(1).optional(),
   details: z.string().max(2000).optional(),
+  welcomePrompt: telegramPromptSchema.nullable().optional(),
 });
 
 export async function PATCH(req: Request, ctx: Ctx) {
@@ -28,7 +32,13 @@ export async function PATCH(req: Request, ctx: Ctx) {
     const bot = await BotService.get(id);
     if (!bot) return json({ error: "NOT_FOUND" }, 404);
     const body = patchSchema.parse(await req.json());
-    await BotService.update(id, { ...body, actorId: user.id });
+    const welcomePrompt =
+      body.welcomePrompt === undefined
+        ? undefined
+        : body.welcomePrompt && body.welcomePrompt.blocks.length
+          ? { blocks: await normalizePromptBlocks(body.welcomePrompt.blocks, ar.welcomeMessage) }
+          : null;
+    await BotService.update(id, { ...body, welcomePrompt, actorId: user.id });
     const updated = await BotService.get(id);
     if (!updated) return json({ error: "NOT_FOUND" }, 404);
     return json({ bot: serializeBot(updated as Record<string, unknown>) });

@@ -1,15 +1,23 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
+import { Bot as BotIcon, FolderKanban, ListChecks, Pencil, Plus, Trash2, Users } from "lucide-react";
 import { ar } from "@/i18n/ar";
-import { Button } from "@/components/ui/button";
+import { Button, buttonClass } from "@/components/ui/button";
 import { Dialog } from "@/components/ui/dialog";
-import { Input } from "@/components/ui/input";
+import { FieldHint, Input, Select, Textarea } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Badge } from "@/components/ui/badge";
+import { Card, EmptyState, PageHeader, Skeleton } from "@/components/ui/card";
 import { useToast } from "@/components/ui/toast";
 import { DynamicFieldsEditor } from "@/components/requests/dynamic-fields-editor";
+import { BranchingRulesEditor } from "@/components/requests/branching-rules-editor";
 import type { RequestField } from "@/types";
+import type { BranchingRule } from "@/lib/requests/branching";
+import { validatePromptBlocks } from "@/lib/telegram/field-prompt";
+import { sortFieldsByOrder } from "@/lib/requests/field-order";
 
 type Bot = { id: string; name: string; username: string };
 type Group = { id: string; title: string; chatId?: number; messageThreadId?: number | null };
@@ -21,6 +29,7 @@ type RequestTab = {
   active: boolean;
   description?: string;
   fields?: RequestField[];
+  branchingRules?: BranchingRule[];
   telegramGroupId?: string | null;
 };
 
@@ -31,6 +40,7 @@ const emptyForm = {
   telegramGroupId: "",
   active: true,
   fields: [] as RequestField[],
+  branchingRules: [] as BranchingRule[],
 };
 
 export default function RequestsPage() {
@@ -44,22 +54,27 @@ export default function RequestsPage() {
   const [form, setForm] = useState(emptyForm);
   const [saving, setSaving] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
+  const [loaded, setLoaded] = useState(false);
 
   async function load() {
-    const [r, b, g] = await Promise.all([
-      fetch("/api/request-types"),
-      fetch("/api/bots"),
-      fetch("/api/telegram/groups"),
-    ]);
-    const rj = await r.json();
-    const bj = await b.json();
-    const gj = await g.json();
-    const list = (bj.bots ?? []) as Bot[];
-    setBots(list);
-    setGroups(gj.groups ?? []);
-    setTabs(rj.requestTypes ?? []);
-    if (!form.botId && list[0]) {
-      setForm((f) => ({ ...f, botId: list[0].id }));
+    try {
+      const [r, b, g] = await Promise.all([
+        fetch("/api/request-types"),
+        fetch("/api/bots"),
+        fetch("/api/telegram/groups"),
+      ]);
+      const rj = await r.json();
+      const bj = await b.json();
+      const gj = await g.json();
+      const list = (bj.bots ?? []) as Bot[];
+      setBots(list);
+      setGroups(gj.groups ?? []);
+      setTabs(rj.requestTypes ?? []);
+      if (!form.botId && list[0]) {
+        setForm((f) => ({ ...f, botId: list[0].id }));
+      }
+    } finally {
+      setLoaded(true);
     }
   }
 
@@ -75,6 +90,7 @@ export default function RequestsPage() {
       botId: bots[0]?.id ?? "",
       active: true,
       fields: [],
+      branchingRules: [],
     });
     setOpen(true);
   }
@@ -87,14 +103,20 @@ export default function RequestsPage() {
       description: t.description ?? "",
       telegramGroupId: t.telegramGroupId ?? "",
       active: t.active,
-      fields: t.fields ?? [],
+      fields: sortFieldsByOrder(t.fields ?? []),
+      branchingRules: t.branchingRules ?? [],
     });
     setOpen(true);
   }
 
   async function save(e: React.FormEvent) {
     e.preventDefault();
-    if (!form.botId) return toast(ar.selectBot);
+    if (!form.botId) return toast(ar.selectBot, "error");
+    for (const field of form.fields) {
+      if (!field.telegramPrompt) continue;
+      const [problem] = validatePromptBlocks(field.telegramPrompt.blocks);
+      if (problem) return toast(`${field.label || field.name}: ${problem.message}`, "error");
+    }
     setSaving(true);
     if (editing) {
       const meta = await fetch(`/api/request-types/${editing.id}`, {
@@ -111,10 +133,14 @@ export default function RequestsPage() {
       const fieldsRes = await fetch(`/api/request-types/${editing.id}/fields`, {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ fields: form.fields }),
+        body: JSON.stringify({ fields: form.fields, branchingRules: form.branchingRules }),
       });
       setSaving(false);
-      if (!meta.ok || !fieldsRes.ok) return toast(ar.saveFailed);
+      if (!fieldsRes.ok) {
+        const err = await fieldsRes.json().catch(() => ({}));
+        return toast(typeof err.error === "string" ? `${ar.saveFailed}: ${err.error}` : ar.saveFailed, "error");
+      }
+      if (!meta.ok) return toast(ar.saveFailed, "error");
       toast(ar.requestUpdated);
     } else {
       const res = await fetch("/api/request-types", {
@@ -125,6 +151,7 @@ export default function RequestsPage() {
           botId: form.botId,
           description: form.description,
           fields: form.fields,
+          branchingRules: form.branchingRules,
           active: form.active,
           telegramGroupId: form.telegramGroupId || null,
         }),
@@ -132,7 +159,7 @@ export default function RequestsPage() {
       setSaving(false);
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
-        toast(typeof err.error === "string" ? `${ar.requestCreateFailed}: ${err.error}` : ar.requestCreateFailed);
+        toast(typeof err.error === "string" ? `${ar.requestCreateFailed}: ${err.error}` : ar.requestCreateFailed, "error");
         return;
       }
       toast(ar.requestCreated);
@@ -153,7 +180,7 @@ export default function RequestsPage() {
     });
     setBusy(null);
     if (!res.ok) {
-      toast(ar.requestDeleteFailed);
+      toast(ar.requestDeleteFailed, "error");
       return;
     }
     toast(ar.requestDeleted);
@@ -165,14 +192,23 @@ export default function RequestsPage() {
     return bots.find((b) => b.id === id)?.name ?? id;
   }
 
+  function groupTitle(id?: string | null) {
+    if (!id) return null;
+    return groups.find((g) => g.id === id)?.title ?? null;
+  }
+
   return (
     <div className="space-y-6">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <h1 className="text-2xl font-bold">{ar.requests}</h1>
-        <Button type="button" onClick={openCreate}>
-          {ar.addRequestTab}
-        </Button>
-      </div>
+      <PageHeader
+        title={ar.requests}
+        description={ar.requestsDescription}
+        actions={
+          <Button type="button" onClick={openCreate}>
+            <Plus className="size-4" />
+            {ar.addRequestTab}
+          </Button>
+        }
+      />
 
       <Dialog
         open={open}
@@ -183,10 +219,10 @@ export default function RequestsPage() {
         bodyClassName="!p-0"
         footer={
           <>
-            <label className="me-auto flex max-w-[min(100%,20rem)] items-start gap-2 text-sm">
+            <label className="me-auto flex w-full cursor-pointer items-start gap-2.5 text-sm sm:w-auto sm:max-w-[22rem]">
               <input
                 type="checkbox"
-                className="mt-1"
+                className="mt-1 size-4 shrink-0 accent-primary"
                 checked={form.active}
                 onChange={(e) => setForm((f) => ({ ...f, active: e.target.checked }))}
               />
@@ -195,30 +231,34 @@ export default function RequestsPage() {
                 <span className="mt-0.5 block text-xs text-muted-foreground">{ar.activateServiceHint}</span>
               </span>
             </label>
-            <Button type="button" variant="outline" onClick={() => setOpen(false)}>
-              {ar.cancel}
-            </Button>
             <Button type="submit" form="service-form" loading={saving}>
               {saving ? ar.loading : form.active ? ar.saveAndActivate : ar.save}
+            </Button>
+            <Button type="button" variant="outline" onClick={() => setOpen(false)}>
+              {ar.cancel}
             </Button>
           </>
         }
       >
         <form id="service-form" onSubmit={save} className="flex flex-col">
-          <div className="space-y-3 border-b border-border px-5 py-4 sm:px-6">
-            <div className="grid gap-3 sm:grid-cols-2">
+          <section className="border-b border-border px-5 py-5 sm:px-6" aria-labelledby="type-basic-info">
+            <h3 id="type-basic-info" className="mb-4 text-sm font-semibold">
+              {ar.basicInfo}
+            </h3>
+            <div className="grid gap-4 sm:grid-cols-2">
               <div>
-                <Label>{ar.name}</Label>
+                <Label htmlFor="type-name">{ar.name}</Label>
                 <Input
+                  id="type-name"
                   value={form.name}
                   onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
                   required
                 />
               </div>
               <div>
-                <Label>{ar.selectBot}</Label>
-                <select
-                  className="w-full rounded-xl border border-border bg-card px-3 py-2 text-sm"
+                <Label htmlFor="type-bot">{ar.linkedBot}</Label>
+                <Select
+                  id="type-bot"
                   value={form.botId}
                   onChange={(e) => setForm((f) => ({ ...f, botId: e.target.value }))}
                   required
@@ -226,28 +266,28 @@ export default function RequestsPage() {
                   <option value="">{ar.selectBot}</option>
                   {bots.map((b) => (
                     <option key={b.id} value={b.id}>
-                      {b.name} (@{b.username})
+                      {`${b.name} (\u2066@${b.username}\u2069)`}
                     </option>
                   ))}
-                </select>
+                </Select>
               </div>
               <div className="sm:col-span-2">
-                <Label>{ar.details}</Label>
-                <textarea
+                <Label htmlFor="type-description">{ar.details}</Label>
+                <Textarea
+                  id="type-description"
                   value={form.description}
                   onChange={(e) => setForm((f) => ({ ...f, description: e.target.value }))}
                   rows={2}
-                  className="w-full rounded-xl border border-border bg-card px-3 py-2 text-sm outline-none ring-primary/30 focus:ring-2"
                 />
               </div>
               <div className="sm:col-span-2">
-                <Label>{ar.groups}</Label>
-                <select
-                  className="w-full rounded-xl border border-border bg-card px-3 py-2 text-sm"
+                <Label htmlFor="type-group">{ar.groups}</Label>
+                <Select
+                  id="type-group"
                   value={form.telegramGroupId}
                   onChange={(e) => setForm((f) => ({ ...f, telegramGroupId: e.target.value }))}
                 >
-                  <option value="">—</option>
+                  <option value="">{ar.noGroup}</option>
                   {groups.map((g) => (
                     <option key={g.id} value={g.id}>
                       {g.title}
@@ -256,68 +296,121 @@ export default function RequestsPage() {
                       {g.chatId ? ")" : ""}
                     </option>
                   ))}
-                </select>
+                </Select>
+                <FieldHint>{ar.telegramGroupHint}</FieldHint>
               </div>
             </div>
-          </div>
+          </section>
 
-          <div className="p-3 sm:p-4">
+          <div className="space-y-4 bg-background/60 p-3 sm:p-5">
             <DynamicFieldsEditor
               fields={form.fields}
+              branchingRules={form.branchingRules}
               onChange={(fields) => setForm((f) => ({ ...f, fields }))}
+            />
+            <BranchingRulesEditor
+              fields={form.fields}
+              rules={form.branchingRules}
+              onChange={(branchingRules) => setForm((f) => ({ ...f, branchingRules }))}
             />
           </div>
         </form>
       </Dialog>
 
-      {tabs.length === 0 ? (
-        <div className="rounded-2xl border border-border bg-card p-6 text-sm text-muted-foreground">{ar.noRequestTabs}</div>
+      {!loaded ? (
+        <Card className="divide-y divide-border">
+          {[0, 1, 2].map((i) => (
+            <div key={i} className="flex items-center gap-4 px-5 py-4">
+              <Skeleton className="size-10 rounded-xl" />
+              <div className="flex-1 space-y-2">
+                <Skeleton className="h-4 w-40" />
+                <Skeleton className="h-3 w-64 max-w-full" />
+              </div>
+            </div>
+          ))}
+        </Card>
+      ) : tabs.length === 0 ? (
+        <Card>
+          <EmptyState
+            icon={<FolderKanban />}
+            title={ar.noRequestTabs}
+            description={ar.requestsDescription}
+            action={
+              <Button type="button" onClick={openCreate}>
+                <Plus className="size-4" />
+                {ar.addRequestTab}
+              </Button>
+            }
+          />
+        </Card>
       ) : (
-        <div className="overflow-x-auto rounded-2xl border border-border bg-card">
-          <table className="min-w-full text-sm">
-            <thead className="bg-muted/60">
-              <tr>
-                <th className="px-3 py-2 text-start">{ar.name}</th>
-                <th className="px-3 py-2 text-start">{ar.linkedBot}</th>
-                <th className="px-3 py-2 text-start">{ar.status}</th>
-                <th className="px-3 py-2 text-start">{ar.fields}</th>
-                <th className="px-3 py-2 text-start">{ar.actions}</th>
-              </tr>
-            </thead>
-            <tbody>
-              {tabs.map((t) => (
-                <tr key={t.id} className="border-t border-border">
-                  <td className="px-3 py-3 font-medium">{t.name}</td>
-                  <td className="px-3 py-3 text-muted-foreground">{botName(t.botId)}</td>
-                  <td className="px-3 py-3">{t.active ? ar.activated : ar.deactivated}</td>
-                  <td className="px-3 py-3">{(t.fields ?? []).length}</td>
-                  <td className="px-3 py-3">
-                    <div className="flex flex-wrap gap-2">
-                      <a
-                        className="inline-flex items-center rounded-xl bg-primary px-3 py-1.5 text-sm text-primary-foreground"
-                        href={`/requests/${t.id}`}
-                      >
-                        {ar.manageOrders}
-                      </a>
-                      <Button type="button" variant="outline" className="px-3 py-1.5" onClick={() => openEdit(t)}>
-                        {ar.editRequest}
-                      </Button>
-                      <Button
-                        type="button"
-                        variant="danger"
-                        className="px-3 py-1.5"
-                        loading={busy === `delete:${t.id}`}
-                        onClick={() => remove(t.id)}
-                      >
-                        {ar.delete}
-                      </Button>
+        <Card className="divide-y divide-border overflow-hidden">
+          {tabs.map((t) => {
+            const group = groupTitle(t.telegramGroupId);
+            const fieldCount = (t.fields ?? []).length;
+            return (
+              <div
+                key={t.id}
+                className="flex flex-col gap-3 px-4 py-4 transition-colors hover:bg-muted/30 sm:px-5 md:flex-row md:items-center"
+              >
+                <div className="flex min-w-0 flex-1 items-start gap-3">
+                  <span className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-primary-soft text-primary">
+                    <FolderKanban className="size-5" />
+                  </span>
+                  <div className="min-w-0 flex-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Link href={`/requests/${t.id}`} className="font-semibold hover:text-primary hover:underline">
+                        {t.name}
+                      </Link>
+                      <Badge tone={t.active ? "success" : "neutral"} dot>
+                        {t.active ? ar.activated : ar.deactivated}
+                      </Badge>
                     </div>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+                    {t.description ? (
+                      <p className="mt-0.5 line-clamp-1 text-sm text-muted-foreground">{t.description}</p>
+                    ) : null}
+                    <div className="mt-1.5 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
+                      <span className="inline-flex items-center gap-1">
+                        <BotIcon className="size-3.5" aria-hidden />
+                        <span className="sr-only">{ar.linkedBot}: </span>
+                        {botName(t.botId)}
+                      </span>
+                      <span className="inline-flex items-center gap-1">
+                        <ListChecks className="size-3.5" aria-hidden />
+                        {ar.fieldsCount.replace("{count}", String(fieldCount))}
+                      </span>
+                      {group ? (
+                        <span className="inline-flex items-center gap-1">
+                          <Users className="size-3.5" aria-hidden />
+                          {group}
+                        </span>
+                      ) : null}
+                    </div>
+                  </div>
+                </div>
+                <div className="flex flex-wrap items-center gap-2 md:shrink-0">
+                  <Link className={buttonClass("secondary", "sm")} href={`/requests/${t.id}`}>
+                    {ar.manageOrders}
+                  </Link>
+                  <Button type="button" variant="outline" size="sm" onClick={() => openEdit(t)}>
+                    <Pencil className="size-3.5" />
+                    {ar.editRequest}
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="danger-ghost"
+                    size="sm"
+                    loading={busy === `delete:${t.id}`}
+                    onClick={() => remove(t.id)}
+                  >
+                    <Trash2 className="size-3.5" />
+                    {ar.delete}
+                  </Button>
+                </div>
+              </div>
+            );
+          })}
+        </Card>
       )}
     </div>
   );

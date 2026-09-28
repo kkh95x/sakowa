@@ -1,15 +1,36 @@
-import { ObjectId } from "mongodb";
+﻿import { ObjectId } from "mongodb";
 import { collections, getDb } from "@/lib/db/client";
 import { BlockedUserService } from "@/lib/blocks/blocked-user-service";
 import { OrderService } from "@/lib/orders/order-service";
+import { NotificationService } from "@/lib/notifications/notification-service";
 import { TelegramService } from "@/lib/telegram/telegram-service";
 import { GridFSStorageService } from "@/lib/storage/gridfs";
 import { persistTelegramUpload } from "@/lib/orders/persist-order-files";
 import { ChatLogService } from "@/lib/chat/chat-log-service";
 import { persistValue, validateFieldValue } from "@/lib/telegram/validate-field";
+import {
+  inboundSummary,
+  normalizeTelegramMessage,
+  openComplaintActivityNotice,
+  toDynamicAnswer,
+  type TelegramMessageLike,
+} from "@/lib/telegram/normalize-input";
+import {
+  nextAskIndex,
+  pruneHiddenAnswers,
+  visibleFieldIds,
+  type BranchingRule,
+} from "@/lib/requests/branching";
+import { notClosedStatusMongoQuery } from "@/lib/orders/complaint-status";
 import { displayChoice, optionLabel } from "@/lib/orders/field-answer";
 import { callbackButtonLabel, isSlashCommand } from "@/lib/chat/callback-label";
-import { ensureUniqueFieldNames } from "@/lib/requests/field-names";
+import {
+  captureFormSnapshot,
+  isFormSnapshot,
+  positionFields,
+  resolveConversationForm,
+  type ConversationForm,
+} from "@/lib/telegram/conversation-form";
 import {
   clampMyOrdersPage,
   formatOrderCommandLine,
@@ -20,8 +41,9 @@ import {
   orderStatusLabel,
 } from "@/lib/telegram/order-command";
 import { logJson } from "@/lib/log";
+import { fieldAnswerHint } from "@/lib/telegram/field-prompt";
 import { correlationId } from "@/lib/security/crypto";
-import type { ConversationState, RequestField } from "@/types";
+import type { ConversationState, RequestField, TelegramPrompt } from "@/types";
 
 type ChatMedia = {
   label: string;
@@ -84,13 +106,10 @@ type From = {
 
 type Update = {
   update_id: number;
-  message?: {
+  message?: TelegramMessageLike & {
     chat: { id: number; type: string; title?: string; is_forum?: boolean };
     from?: From;
-    text?: string;
     message_thread_id?: number;
-    photo?: { file_id: string }[];
-    document?: { file_id: string; file_name?: string; mime_type?: string };
   };
   callback_query?: {
     id: string;
@@ -106,6 +125,11 @@ type CallbackMessage = {
   text?: string;
   caption?: string;
   photo?: { file_id: string }[];
+  document?: unknown;
+  video?: unknown;
+  audio?: unknown;
+  voice?: unknown;
+  animation?: unknown;
   reply_markup?: { inline_keyboard?: { text?: string; callback_data?: string }[][] };
 };
 
@@ -117,10 +141,15 @@ function buttonLabel(data: string, source?: CallbackMessage, fallback?: string) 
   return callbackButtonLabel(data, source?.reply_markup?.inline_keyboard) || fallback || "";
 }
 
-function activeFields(fields: RequestField[]) {
-  return ensureUniqueFieldNames(
-    [...fields].filter((f) => f.active !== false).sort((a, b) => a.order - b.order),
-  );
+const FORM_CHANGED_NOTICE =
+  "تم تحديث نموذج هذه الشكوى أثناء تعبئتها، لذلك لم تُحفظ رسالتك الأخيرة. سنكمل من السؤال التالي.";
+const INACTIVE_COMPLAINT_NOTICE = "هذه الشكوى لم تعد قيد التعبئة. استخدم /start لبدء شكوى جديدة.";
+const ACTIVE_STATES = new Set(["WAITING_FOR_FIELD", "WAITING_FOR_FILE", "REVIEW"]);
+const CLEARED_FORM = { formSnapshot: null, currentFieldId: null, draftId: null };
+
+/** Identity of one draft; async work captured under an old draftId must never touch a newer draft. */
+function newDraftId() {
+  return new ObjectId().toHexString();
 }
 
 function draftValue(draft: Record<string, unknown>, field: { id: string; name: string }) {
@@ -131,6 +160,14 @@ function draftValue(draft: Record<string, unknown>, field: { id: string; name: s
 function writeDraft(draft: Record<string, unknown>, field: { id: string; name: string }, value: unknown) {
   draft[field.id] = value;
   draft[field.name] = value;
+}
+
+function applyBranchingDraft(
+  fields: RequestField[],
+  rules: BranchingRule[],
+  draft: Record<string, unknown>,
+) {
+  return pruneHiddenAnswers(fields, rules, draft);
 }
 
 function isTelegramFileId(value: string) {
@@ -167,6 +204,9 @@ async function conv(botId: string, telegramUserId: number) {
     state: "IDLE" as ConversationState,
     requestTypeId: null as string | null,
     fieldIndex: 0,
+    currentFieldId: null as string | null,
+    formSnapshot: null,
+    draftId: null as string | null,
     draft: {} as Record<string, unknown>,
     attachments: [] as string[],
     updatedAt: new Date(),
@@ -183,6 +223,85 @@ async function patch(botId: string, telegramUserId: number, data: Record<string,
     { botId, telegramUserId },
     { $set: { ...data, updatedAt: new Date() } },
   );
+}
+
+type LoadedForm = ConversationForm & { state: Record<string, unknown> };
+
+/** The form this conversation follows; converts old index-only conversations on first read. */
+async function loadForm(
+  botId: string,
+  telegramUserId: number,
+  known?: Record<string, unknown>,
+): Promise<LoadedForm | null> {
+  const state = (known ?? (await conv(botId, telegramUserId))) as Record<string, unknown>;
+  if (!state.requestTypeId || !ObjectId.isValid(String(state.requestTypeId))) return null;
+  let live: Record<string, unknown> | null = null;
+  if (!isFormSnapshot(state.formSnapshot, state.requestTypeId)) {
+    const db = await getDb();
+    live = await db.collection(collections.requestTypes).findOne({ _id: new ObjectId(String(state.requestTypeId)) });
+  }
+  const form = resolveConversationForm(state, live as never);
+  if (!form) return null;
+  if (form.adopted) {
+    const adoptedFields = { formSnapshot: form.snapshot, ...positionFields(form.fields, form.currentIndex) };
+    await patch(botId, telegramUserId, adoptedFields);
+    Object.assign(state, adoptedFields);
+    logJson("info", "telegram", "conversation_form_adopted", {
+      botId,
+      telegramUserId,
+      requestTypeId: String(state.requestTypeId),
+      mode: form.adopted,
+      currentFieldId: adoptedFields.currentFieldId,
+    });
+  }
+  return { ...form, state };
+}
+
+/**
+ * Applies a finished background upload to the draft it was started for. The write is
+ * filtered on draftId, so an upload that outlives its draft (submit, cancel, /start,
+ * a new complaint) is dropped instead of leaking into the next draft.
+ */
+async function attachUploadToDraft(params: {
+  botId: string;
+  telegramUserId: number;
+  draftId: string;
+  field: RequestField;
+  telegramFileId: string;
+  gridFsId: string;
+  existingFileId: (value: unknown) => string;
+  value: unknown;
+}) {
+  const db = await getDb();
+  const owner = { botId: params.botId, telegramUserId: params.telegramUserId, draftId: params.draftId };
+  const stale = (reason: string) => {
+    logJson("warn", "telegram", "stale_upload_not_attached", {
+      botId: params.botId,
+      telegramUserId: params.telegramUserId,
+      draftId: params.draftId,
+      fieldId: params.field.id,
+      gridFsId: params.gridFsId,
+      reason,
+    });
+    return false;
+  };
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const current = await db.collection(collections.telegramConversations).findOne(owner);
+    if (!current) return stale("draft_replaced");
+    const snapshot = current.formSnapshot as { fields?: RequestField[] } | null | undefined;
+    if (snapshot?.fields && !snapshot.fields.some((f) => f.id === params.field.id)) return stale("field_not_in_draft");
+    const nextDraft = { ...((current.draft as Record<string, unknown>) ?? {}) };
+    const existingId = params.existingFileId(draftValue(nextDraft, params.field));
+    if (existingId && existingId !== params.telegramFileId) return stale("answer_replaced");
+    writeDraft(nextDraft, params.field, params.value);
+    const attachments = [...new Set([...((current.attachments as string[]) ?? []), params.gridFsId])];
+    // updatedAt acts as a version so a concurrent answer in the same draft is not overwritten.
+    const result = await db
+      .collection(collections.telegramConversations)
+      .updateOne({ ...owner, updatedAt: current.updatedAt }, { $set: { draft: nextDraft, attachments, updatedAt: new Date() } });
+    if (result.matchedCount) return true;
+  }
+  return stale("write_conflict");
 }
 
 async function recordLastInbound(
@@ -279,19 +398,19 @@ export class TelegramConversationService {
     await upsertUser(from);
     await recordLastInbound(botId, from, msg, Boolean(cb));
     if (msg && msg.chat.type === "private") {
-      const photoId = msg.photo?.at(-1)?.file_id ?? null;
-      const docId = msg.document?.file_id ?? null;
-      const inboundText = msg.text?.trim() || null;
-      if (inboundText || photoId || docId) {
+      const normalized = normalizeTelegramMessage(msg);
+      const inboundText = normalized ? inboundSummary(normalized) : msg.text?.trim() || null;
+      if (normalized && (normalized.text || normalized.telegramFileId || normalized.contentType !== "unknown")) {
         void ChatLogService.captureInbound({
           botId,
           telegramUserId: from.id,
           chatId,
           text: inboundText,
-          photoFileId: photoId,
-          documentFileId: docId,
-          filename: msg.document?.file_name ?? (photoId ? "photo.jpg" : null),
-          mimeType: msg.document?.mime_type ?? null,
+          photoFileId: normalized.contentType === "photo" ? normalized.telegramFileId : null,
+          documentFileId:
+            normalized.contentType !== "photo" && normalized.telegramFileId ? normalized.telegramFileId : null,
+          filename: normalized.filename,
+          mimeType: normalized.mimeType,
           kind: isSlashCommand(inboundText) ? "command" : undefined,
         });
       }
@@ -334,7 +453,14 @@ export class TelegramConversationService {
     const command = text.split(/\s+/)[0]?.split("@")[0] ?? "";
 
     if (command === "/start" || command === "/cancel") {
-      await patch(botId, from.id, { state: "IDLE", requestTypeId: null, fieldIndex: 0, draft: {}, attachments: [] });
+      await patch(botId, from.id, {
+        state: "IDLE",
+        requestTypeId: null,
+        fieldIndex: 0,
+        draft: {},
+        attachments: [],
+        ...CLEARED_FORM,
+      });
       const types = await db
         .collection(collections.requestTypes)
         .find({ botId, active: true, archivedAt: null })
@@ -342,18 +468,18 @@ export class TelegramConversationService {
         .toArray();
       const rows = [
         ...types.map((t) => [{ text: String(t.name), callback_data: `req:${String(t._id)}` }]),
-        [{ text: "📋 طلباتي", callback_data: "menu:my" }],
+        [{ text: "📋 شكاواي", callback_data: "menu:my" }],
         [{ text: "ℹ️ المساعدة", callback_data: "menu:help" }],
       ];
-      await TelegramService.sendMessage(
-        botId,
-        chatId,
-        types.length ? "أهلاً بك 👋\n\nاختر الخدمة:" : "أهلاً بك 👋\n\nلا توجد خدمات مفعّلة حالياً.",
-        kb(rows),
-      );
+      const bot = await db.collection(collections.bots).findOne({ _id: new ObjectId(botId) });
+      await TelegramService.sendWelcome(botId, chatId, {
+        bot: bot as { welcomePrompt?: TelegramPrompt | null } | null,
+        hasActiveTypes: types.length > 0,
+        extra: kb(rows),
+      });
       return;
     }
-    if (command === "/طلبات" || command === "/orders") {
+    if (command === "/طلبات" || command === "/orders" || command === "/شكاوى" || command === "/complaints") {
       await this.sendMyOrders(botId, from.id, chatId);
       return;
     }
@@ -376,7 +502,33 @@ export class TelegramConversationService {
     const state = await conv(botId, from.id);
     if (state.state === "WAITING_FOR_FIELD" || state.state === "WAITING_FOR_FILE") {
       await this.onField(botId, from, chatId, state, msg, requestId);
+      return;
     }
+    if (msg && msg.chat.type === "private" && !isSlashCommand(text)) {
+      await this.notifyOpenComplaintActivity(botId, from.id, msg);
+    }
+  }
+
+  static async notifyOpenComplaintActivity(botId: string, telegramUserId: number, msg?: Update["message"]) {
+    const db = await getDb();
+    const order = await db.collection(collections.orders).findOne(
+      {
+        ...OrderService.userMatch(telegramUserId, { botId }),
+        status: notClosedStatusMongoQuery(),
+      },
+      { sort: { createdAt: -1 } },
+    );
+    if (!order) return;
+    const input = normalizeTelegramMessage(msg);
+    const notice = openComplaintActivityNotice(String(order.orderNumber), input);
+    await NotificationService.notifyAdmins({
+      ...notice,
+      orderId: String(order._id),
+      requestTypeId: String(order.requestTypeId ?? ""),
+      botId,
+      entityType: "complaint",
+      entityId: String(order._id),
+    });
   }
 
   static async startService(
@@ -394,18 +546,21 @@ export class TelegramConversationService {
       archivedAt: null,
     });
     if (!request) {
-      await TelegramService.sendMessage(botId, chatId, "هذه الخدمة غير متاحة حالياً.");
+      await TelegramService.sendMessage(botId, chatId, "هذا النوع من الشكاوى غير متاح حالياً.");
       return;
     }
     if (await BlockedUserService.isBlocked(from.id, requestTypeId)) {
-      await TelegramService.sendMessage(botId, chatId, "لا يمكنك استخدام هذه الخدمة حالياً.");
+      await TelegramService.sendMessage(botId, chatId, "لا يمكنك استخدام هذا النوع من الشكاوى حالياً.");
       return;
     }
     await revealChoice(botId, from, chatId, source, String(request.name));
+    const snapshot = captureFormSnapshot(request);
     await patch(botId, from.id, {
       state: "WAITING_FOR_FIELD",
       requestTypeId,
-      fieldIndex: 0,
+      formSnapshot: snapshot,
+      draftId: newDraftId(),
+      ...positionFields(snapshot.fields, 0),
       draft: {},
       attachments: [],
     });
@@ -425,12 +580,12 @@ export class TelegramConversationService {
       await TelegramService.sendMessage(
         botId,
         chatId,
-        "استخدم الأزرار لاختيار خدمة أو عرض طلباتك.\nيمكنك إلغاء العملية الحالية عبر /cancel",
+        "استخدم الأزرار لاختيار نوع الشكوى أو عرض شكاواك.\nيمكنك إلغاء العملية الحالية عبر /cancel",
       );
       return;
     }
     if (data === "menu:my") {
-      await revealChoice(botId, from, chatId, source, buttonLabel(data, source, "📋 طلباتي"));
+      await revealChoice(botId, from, chatId, source, buttonLabel(data, source, "📋 شكاواي"));
       await this.sendMyOrders(botId, from.id, chatId);
       return;
     }
@@ -450,14 +605,14 @@ export class TelegramConversationService {
         .find({ botId, active: true, archivedAt: null })
         .toArray();
       if (!types.length) {
-        await TelegramService.sendMessage(botId, chatId, "لا توجد خدمات متاحة حالياً.");
+        await TelegramService.sendMessage(botId, chatId, "لا توجد أنواع شكاوى متاحة حالياً.");
         return;
       }
       await patch(botId, from.id, { state: "SELECTING_REQUEST" });
       await TelegramService.sendMessage(
         botId,
         chatId,
-        "اختر الخدمة:",
+        "اختر نوع الشكوى:",
         kb(types.map((t) => [{ text: String(t.name), callback_data: `req:${String(t._id)}` }])),
       );
       return;
@@ -469,15 +624,32 @@ export class TelegramConversationService {
     }
     if (data.startsWith("o:") || data.startsWith("c:") || data.startsWith("d:") || data.startsWith("y:") || data.startsWith("n:")) {
       const state = await conv(botId, from.id);
+      if (!state.requestTypeId || !ACTIVE_STATES.has(String(state.state))) {
+        await TelegramService.sendMessage(botId, chatId, INACTIVE_COMPLAINT_NOTICE);
+        return;
+      }
       await this.onChoice(botId, from, chatId, state, data, source);
       return;
     }
     if (data === "confirm:yes") {
       await revealChoice(botId, from, chatId, source, buttonLabel(data, source, "تأكيد"));
       const state = await conv(botId, from.id);
-      if (!state.requestTypeId) return;
+      if (!state.requestTypeId || state.state !== "REVIEW") {
+        await TelegramService.sendMessage(botId, chatId, INACTIVE_COMPLAINT_NOTICE);
+        return;
+      }
       if (await BlockedUserService.isBlocked(from.id, String(state.requestTypeId))) {
-        await TelegramService.sendMessage(botId, chatId, "لا يمكنك استخدام هذا الطلب حالياً.");
+        await TelegramService.sendMessage(botId, chatId, "لا يمكنك إرسال هذه الشكوى حالياً.");
+        return;
+      }
+      const form = await loadForm(botId, from.id, state);
+      if (!form) {
+        await TelegramService.sendMessage(botId, chatId, "هذا النوع من الشكاوى غير متاح حالياً.");
+        return;
+      }
+      if (form.adopted === "legacy-resynced") {
+        await TelegramService.sendMessage(botId, chatId, FORM_CHANGED_NOTICE);
+        await this.askField(botId, from.id, chatId, String(state.requestTypeId), form.currentIndex);
         return;
       }
       try {
@@ -488,14 +660,16 @@ export class TelegramConversationService {
           chatId,
           telegramUsername: from.username,
           telegramName: [from.first_name, from.last_name].filter(Boolean).join(" "),
-          fields: await this.draftFieldsForSubmit(botId, from.id, String(state.requestTypeId)),
-          attachments: (state.attachments as string[]) ?? [],
+          fields: this.draftFieldsForSubmit(form),
+          attachments: (form.state.attachments as string[]) ?? [],
+          fieldDefs: form.fields,
+          branchingRules: form.rules,
         });
-        await patch(botId, from.id, { state: "SUBMITTED", draft: {}, attachments: [] });
+        await patch(botId, from.id, { state: "SUBMITTED", draft: {}, attachments: [], ...CLEARED_FORM });
         await TelegramService.sendMessage(
           botId,
           chatId,
-          `تم إنشاء طلبك بنجاح.\nرقم الطلب: #${submitted.orderNumber}`,
+          `تم إنشاء شكواك بنجاح.\nرقم الشكوى: #${submitted.orderNumber}`,
         );
       } catch (err) {
         logJson("error", "telegram", "ORDER_SUBMIT_FAILED", {
@@ -508,15 +682,15 @@ export class TelegramConversationService {
         await TelegramService.sendMessage(
           botId,
           chatId,
-          "تعذر إرسال الطلب. تأكد من المرفقات وحاول مرة أخرى.",
+          "تعذر إرسال الشكوى. تأكد من المرفقات وحاول مرة أخرى.",
         );
       }
       return;
     }
     if (data === "confirm:no") {
       await revealChoice(botId, from, chatId, source, buttonLabel(data, source, "إلغاء"));
-      await patch(botId, from.id, { state: "CANCELLED", draft: {}, attachments: [] });
-      await TelegramService.sendMessage(botId, chatId, "تم إلغاء الطلب.");
+      await patch(botId, from.id, { state: "CANCELLED", draft: {}, attachments: [], ...CLEARED_FORM });
+      await TelegramService.sendMessage(botId, chatId, "تم إلغاء الشكوى.");
     }
   }
 
@@ -530,11 +704,11 @@ export class TelegramConversationService {
     const db = await getDb();
     const query = {
       ...OrderService.userMatch(telegramUserId, { botId }),
-      status: { $ne: "ARCHIVED" },
+      status: notClosedStatusMongoQuery(),
     };
     const total = await db.collection(collections.orders).countDocuments(query);
     if (!total) {
-      await TelegramService.sendMessage(botId, chatId, "لا توجد طلبات سابقة.");
+      await TelegramService.sendMessage(botId, chatId, "لا توجد شكاوى سابقة.");
       return;
     }
     const safePage = clampMyOrdersPage(page, total);
@@ -581,7 +755,7 @@ export class TelegramConversationService {
         /* send a fresh list */
       }
     }
-    await TelegramService.sendMessage(botId, chatId, "📋 طلباتي", extra);
+    await TelegramService.sendMessage(botId, chatId, "📋 شكاواي", extra);
   }
 
   static async sendOrderDetails(
@@ -592,7 +766,7 @@ export class TelegramConversationService {
   ) {
     const db = await getDb();
     const owner = OrderService.userMatch(telegramUserId, { botId });
-    const query: Record<string, unknown> = { ...owner, status: { $ne: "ARCHIVED" } };
+    const query: Record<string, unknown> = { ...owner, status: notClosedStatusMongoQuery() };
     if (typeof ref === "number") {
       query.orderNumber = orderNumberLookup(ref);
     } else if (ObjectId.isValid(ref) && String(new ObjectId(ref)) === ref) {
@@ -600,14 +774,14 @@ export class TelegramConversationService {
     } else {
       const digits = Number(String(ref).replace(/\D/g, ""));
       if (!Number.isFinite(digits) || digits <= 0) {
-        await TelegramService.sendMessage(botId, chatId, "لم يتم العثور على هذا الطلب.");
+        await TelegramService.sendMessage(botId, chatId, "لم يتم العثور على هذه الشكوى.");
         return;
       }
       query.orderNumber = orderNumberLookup(digits);
     }
     const order = await db.collection(collections.orders).findOne(query);
     if (!order) {
-      await TelegramService.sendMessage(botId, chatId, "لم يتم العثور على هذا الطلب.");
+      await TelegramService.sendMessage(botId, chatId, "لم يتم العثور على هذه الشكوى.");
       return;
     }
 
@@ -618,7 +792,7 @@ export class TelegramConversationService {
       : null;
     const fields = (request?.fields as RequestField[]) ?? [];
     const sanitized = OrderService.sanitizeOrder(order as Record<string, unknown>, fields);
-    const rows = OrderService.summarizeFields(sanitized, fields);
+    const rows = OrderService.summarizeSubmittedAnswers(sanitized, fields);
 
     const createdAt = order.createdAt ? new Date(String(order.createdAt)) : null;
     const createdLabel =
@@ -627,11 +801,11 @@ export class TelegramConversationService {
         : "";
 
     const lines = [
-      "📋 تفاصيل الطلب",
-      `رقم الطلب: #${order.orderNumber}`,
+      "📋 تفاصيل الشكوى",
+      `رقم الشكوى: #${order.orderNumber}`,
       `الحالة: ${orderStatusLabel(order.status)}`,
     ];
-    if (request?.name) lines.push(`الخدمة: ${request.name}`);
+    if (request?.name) lines.push(`نوع الشكوى: ${request.name}`);
     if (createdLabel) lines.push(`التاريخ: ${createdLabel}`);
     lines.push("");
 
@@ -670,17 +844,14 @@ export class TelegramConversationService {
     }
   }
 
-  static async draftFieldsForSubmit(botId: string, telegramUserId: number, requestTypeId: string) {
-    const db = await getDb();
-    const request = await db.collection(collections.requestTypes).findOne({
-      _id: new ObjectId(requestTypeId),
-    });
-    const fields = activeFields((request?.fields as RequestField[]) ?? []);
-    const state = await conv(botId, telegramUserId);
-    const draft = (state.draft as Record<string, unknown>) ?? {};
+  static draftFieldsForSubmit(form: LoadedForm) {
+    const { fields, rules, state } = form;
+    const draft = applyBranchingDraft(fields, rules, (state.draft as Record<string, unknown>) ?? {});
+    const visible = visibleFieldIds(fields, rules, draft);
     const mapped: Record<string, unknown> = {};
     for (const field of fields) {
       if (field.type === "INSTRUCTION") continue;
+      if (!visible.has(field.id)) continue;
       const value = draftValue(draft, field);
       if (value !== undefined) mapped[field.name] = value;
     }
@@ -694,19 +865,27 @@ export class TelegramConversationService {
     requestTypeId: string,
     index: number,
   ) {
-    const db = await getDb();
-    const request = await db.collection(collections.requestTypes).findOne({ _id: new ObjectId(requestTypeId) });
-    const fields = activeFields((request?.fields as RequestField[]) ?? []);
+    const form = await loadForm(botId, telegramUserId);
+    if (!form) {
+      await TelegramService.sendMessage(botId, chatId, "هذا النوع من الشكاوى غير متاح حالياً.");
+      return;
+    }
+    const { fields, rules, state } = form;
+    const draft = (state.draft as Record<string, unknown>) ?? {};
+    const visible = visibleFieldIds(fields, rules, draft);
     let i = index;
-    while (fields[i]?.type === "INSTRUCTION") {
-      const instruction = fields[i];
-      await TelegramService.sendFieldPrompt(
-        botId,
-        chatId,
-        instruction.telegramMessage || instruction.label,
-        instruction,
-      );
-      i += 1;
+    while (i < fields.length) {
+      const current = fields[i];
+      if (!current || !visible.has(current.id)) {
+        i += 1;
+        continue;
+      }
+      if (current.type === "INSTRUCTION") {
+        await TelegramService.sendFieldPrompt(botId, chatId, current);
+        i += 1;
+        continue;
+      }
+      break;
     }
     if (i >= fields.length) {
       await this.review(botId, telegramUserId, chatId, requestTypeId);
@@ -715,84 +894,89 @@ export class TelegramConversationService {
     const field = fields[i];
     const waitingFile = field.type === "FILE" || field.type === "IMAGE";
     await patch(botId, telegramUserId, {
-      fieldIndex: i,
+      ...positionFields(fields, i),
       state: waitingFile ? "WAITING_FOR_FILE" : "WAITING_FOR_FIELD",
     });
-    const prompt = field.telegramMessage || field.label;
     logJson("info", "telegram", "ask_field", {
       botId,
       requestTypeId,
       fieldIndex: i,
+      fieldId: field.id,
       fieldName: field.name,
       fieldType: field.type,
+      promptBlocks: field.telegramPrompt?.blocks?.map((b) => b.type) ?? null,
       imageFileId: field.imageFileId ?? null,
       attachmentFileId: field.attachmentFileId ?? null,
     });
     if (field.type === "SELECT" || field.type === "RADIO") {
-      await TelegramService.sendFieldPrompt(botId, chatId, prompt, field, kb(optionRows(field, i)));
+      await TelegramService.sendFieldPrompt(botId, chatId, field, { extra: kb(optionRows(field, i)) });
       return;
     }
     if (field.type === "CHECKBOX") {
-      const state = await conv(botId, telegramUserId);
       const selected = new Set(
-        (draftValue((state.draft as Record<string, unknown>) ?? {}, field) as string[] | undefined) ?? [],
+        (draftValue(draft, field) as string[] | undefined) ?? [],
       );
-      await TelegramService.sendFieldPrompt(botId, chatId, prompt, field, kb(checkboxRows(field, i, selected)));
+      await TelegramService.sendFieldPrompt(botId, chatId, field, { extra: kb(checkboxRows(field, i, selected)) });
       return;
     }
     if (field.type === "CONFIRMATION") {
-      await TelegramService.sendFieldPrompt(
-        botId,
-        chatId,
-        prompt,
-        field,
-        kb([[{ text: "نعم", callback_data: `y:${i}` }, { text: "لا", callback_data: `n:${i}` }]]),
-      );
+      await TelegramService.sendFieldPrompt(botId, chatId, field, {
+        extra: kb([[{ text: "نعم", callback_data: `y:${i}` }, { text: "لا", callback_data: `n:${i}` }]]),
+      });
       return;
     }
-    const askPrompt =
-      field.type === "FILE"
-        ? `${prompt}\n\n📎 أرسل ملفاً.`
-        : field.type === "IMAGE"
-          ? `${prompt}\n\n📷 أرسل صورة.`
-          : prompt;
-    await TelegramService.sendFieldPrompt(botId, chatId, askPrompt, field);
+    await TelegramService.sendFieldPrompt(botId, chatId, field, { hint: fieldAnswerHint(field.type) });
   }
 
-  static async review(botId: string, telegramUserId: number, chatId: number, requestTypeId: string) {
-    const db = await getDb();
-    const request = await db.collection(collections.requestTypes).findOne({ _id: new ObjectId(requestTypeId) });
-    const state = await conv(botId, telegramUserId);
-    const fields = activeFields((request?.fields as RequestField[]) ?? []);
-    const draft = (state.draft as Record<string, unknown>) ?? {};
+  static async review(botId: string, telegramUserId: number, chatId: number, _requestTypeId: string) {
+    const form = await loadForm(botId, telegramUserId);
+    if (!form) {
+      await TelegramService.sendMessage(botId, chatId, "هذا النوع من الشكاوى غير متاح حالياً.");
+      return;
+    }
+    const { fields, rules, state, snapshot } = form;
+    const draft = applyBranchingDraft(fields, rules, (state.draft as Record<string, unknown>) ?? {});
+    const visible = visibleFieldIds(fields, rules, draft);
     const lines: string[] = [];
     const mediaPreview: ChatMedia[] = [];
-    if (request?.name) lines.push(`الخدمة: ${request.name}`);
+    if (snapshot.requestTypeName) lines.push(`نوع الشكوى: ${snapshot.requestTypeName}`);
 
     for (const f of fields) {
-      if (f.type === "INSTRUCTION") continue;
+      if (f.type === "INSTRUCTION" || !visible.has(f.id)) continue;
       const value = draftValue(draft, f);
-      if (f.type === "FILE" || f.type === "IMAGE") {
+      if (f.type === "FILE" || f.type === "IMAGE" || f.type === "DYNAMIC") {
         const meta =
           value && typeof value === "object"
-            ? (value as { telegramFileId?: string; kind?: "photo" | "document"; gridFsId?: string })
+            ? (value as {
+                telegramFileId?: string;
+                fileId?: string;
+                kind?: "photo" | "document";
+                contentType?: string;
+                gridFsId?: string;
+                storageId?: string;
+                text?: string | null;
+              })
             : null;
         const telegramFileId =
           meta?.telegramFileId ||
+          meta?.fileId ||
           (typeof value === "string" && isTelegramFileId(value) ? value : "");
         const kind: "photo" | "document" =
-          meta?.kind || (f.type === "IMAGE" ? "photo" : "document");
-        const gridFsId = meta?.gridFsId ? String(meta.gridFsId) : undefined;
+          meta?.kind === "photo" || meta?.contentType === "photo" || f.type === "IMAGE" ? "photo" : "document";
+        const gridFsId = meta?.gridFsId || meta?.storageId ? String(meta.gridFsId || meta.storageId) : undefined;
         if (telegramFileId || gridFsId) {
-          lines.push(`${f.label}: ${kind === "photo" ? "📷 صورة مرفقة" : "📎 ملف مرفق"}`);
+          lines.push(`${f.label}: ${kind === "photo" ? "📷 صورة مرفقة" : "📎 مرفق"}`);
           mediaPreview.push({
             label: f.label,
             telegramFileId,
             kind,
             gridFsId,
           });
+        } else if (meta?.text) {
+          lines.push(`${f.label}: ${meta.text}`);
         } else {
-          lines.push(`${f.label}: —`);
+          const display = displayChoice(f, value) || "—";
+          lines.push(`${f.label}: ${display}`);
         }
         continue;
       }
@@ -800,7 +984,7 @@ export class TelegramConversationService {
       lines.push(`${f.label}: ${display}`);
     }
 
-    await patch(botId, telegramUserId, { state: "REVIEW" });
+    await patch(botId, telegramUserId, { state: "REVIEW", draft, ...positionFields(fields, fields.length) });
 
     for (const media of mediaPreview) {
       await sendChatMedia(botId, chatId, media);
@@ -809,7 +993,7 @@ export class TelegramConversationService {
     await TelegramService.sendMessage(
       botId,
       chatId,
-      `يرجى تأكيد الطلب:\n\n${lines.join("\n") || "—"}`,
+      `مراجعة الشكوى\n\n${lines.join("\n") || "—"}\n\nهل تريد إرسال الشكوى؟`,
       kb([[{ text: "تأكيد", callback_data: "confirm:yes" }, { text: "إلغاء", callback_data: "confirm:no" }]]),
     );
   }
@@ -824,21 +1008,29 @@ export class TelegramConversationService {
   ) {
     const [kind, indexStr, optStr] = data.split(":");
     const index = Number(indexStr);
-    const db = await getDb();
-    const request = await db
-      .collection(collections.requestTypes)
-      .findOne({ _id: new ObjectId(String(state.requestTypeId)) });
-    const fields = activeFields((request?.fields as RequestField[]) ?? []);
+    const form = await loadForm(botId, from.id, state);
+    if (!form) return;
+    if (form.adopted === "legacy-resynced") {
+      await TelegramService.sendMessage(botId, chatId, FORM_CHANGED_NOTICE);
+      await this.askField(botId, from.id, chatId, String(state.requestTypeId), form.currentIndex);
+      return;
+    }
+    const { fields, rules } = form;
     const field = fields[index];
     if (!field) return;
-    const draft = { ...((state.draft as Record<string, unknown>) ?? {}) };
+    let draft = { ...((form.state.draft as Record<string, unknown>) ?? {}) };
+    const advance = async () => {
+      draft = applyBranchingDraft(fields, rules, draft);
+      const next = nextAskIndex(fields, rules, draft, index);
+      await patch(botId, from.id, { draft, ...positionFields(fields, next) });
+      await this.askField(botId, from.id, chatId, String(state.requestTypeId), next);
+    };
     if (kind === "o") {
       const opt = field.options?.[Number(optStr)];
       if (!opt) return;
       writeDraft(draft, field, persistValue(field, opt.value));
-      await patch(botId, from.id, { draft, fieldIndex: index + 1 });
       await revealChoice(botId, from, chatId, source, buttonLabel(data, source, opt.label));
-      await this.askField(botId, from.id, chatId, String(state.requestTypeId), index + 1);
+      await advance();
       return;
     }
     if (kind === "c") {
@@ -874,7 +1066,6 @@ export class TelegramConversationService {
         return;
       }
       writeDraft(draft, field, selected);
-      await patch(botId, from.id, { draft, fieldIndex: index + 1 });
       await revealChoice(
         botId,
         from,
@@ -882,14 +1073,13 @@ export class TelegramConversationService {
         source,
         selected.map((value) => optionLabel(field, value)).join("، ") || "—",
       );
-      await this.askField(botId, from.id, chatId, String(state.requestTypeId), index + 1);
+      await advance();
       return;
     }
     if (kind === "y" || kind === "n") {
       writeDraft(draft, field, kind === "y");
-      await patch(botId, from.id, { draft, fieldIndex: index + 1 });
       await revealChoice(botId, from, chatId, source, buttonLabel(data, source, kind === "y" ? "نعم" : "لا"));
-      await this.askField(botId, from.id, chatId, String(state.requestTypeId), index + 1);
+      await advance();
     }
   }
 
@@ -901,19 +1091,32 @@ export class TelegramConversationService {
     msg?: Update["message"],
     requestId?: string,
   ) {
-    const db = await getDb();
-    const request = await db
-      .collection(collections.requestTypes)
-      .findOne({ _id: new ObjectId(String(state.requestTypeId)) });
-    const fields = activeFields((request?.fields as RequestField[]) ?? []);
-    const index = Number(state.fieldIndex ?? 0);
+    const form = await loadForm(botId, from.id, state);
+    if (!form) {
+      await TelegramService.sendMessage(botId, chatId, "هذا النوع من الشكاوى غير متاح حالياً.");
+      return;
+    }
+    if (form.adopted === "legacy-resynced") {
+      await TelegramService.sendMessage(botId, chatId, FORM_CHANGED_NOTICE);
+      await this.askField(botId, from.id, chatId, String(state.requestTypeId), form.currentIndex);
+      return;
+    }
+    const { fields, rules } = form;
+    const index = form.currentIndex;
     const field = fields[index];
     if (!field) {
       await this.review(botId, from.id, chatId, String(state.requestTypeId));
       return;
     }
-    const draft = { ...((state.draft as Record<string, unknown>) ?? {}) };
-    const attachments = [...((state.attachments as string[]) ?? [])];
+    let draft = { ...((form.state.draft as Record<string, unknown>) ?? {}) };
+    const attachments = [...((form.state.attachments as string[]) ?? [])];
+    const draftId = typeof form.state.draftId === "string" && form.state.draftId ? form.state.draftId : newDraftId();
+    const goNext = async () => {
+      draft = applyBranchingDraft(fields, rules, draft);
+      const next = nextAskIndex(fields, rules, draft, index);
+      await patch(botId, from.id, { draft, attachments, ...positionFields(fields, next) });
+      await this.askField(botId, from.id, chatId, String(state.requestTypeId), next);
+    };
 
     if (field.type === "SELECT" || field.type === "RADIO" || field.type === "CHECKBOX" || field.type === "CONFIRMATION") {
       const typed = msg?.text?.trim();
@@ -921,8 +1124,7 @@ export class TelegramConversationService {
         const opt = field.options?.find((o) => o.label === typed || o.value === typed);
         if (opt) {
           writeDraft(draft, field, persistValue(field, opt.value));
-          await patch(botId, from.id, { draft, fieldIndex: index + 1 });
-          await this.askField(botId, from.id, chatId, String(state.requestTypeId), index + 1);
+          await goNext();
           return;
         }
       }
@@ -931,12 +1133,71 @@ export class TelegramConversationService {
         const no = typed === "لا" || /^no$/i.test(typed);
         if (yes || no) {
           writeDraft(draft, field, yes);
-          await patch(botId, from.id, { draft, fieldIndex: index + 1 });
-          await this.askField(botId, from.id, chatId, String(state.requestTypeId), index + 1);
+          await goNext();
           return;
         }
       }
       await this.askField(botId, from.id, chatId, String(state.requestTypeId), index);
+      return;
+    }
+
+    if (field.type === "DYNAMIC") {
+      const input = normalizeTelegramMessage(msg);
+      if (!input || input.contentType === "unknown") {
+        await TelegramService.sendMessage(
+          botId,
+          chatId,
+          "يرجى إرسال نص أو صورة أو صوت أو فيديو أو ملف أو موقع أو جهة اتصال.",
+        );
+        return;
+      }
+      const answer = toDynamicAnswer(input);
+      writeDraft(draft, field, answer);
+      const next = nextAskIndex(fields, rules, applyBranchingDraft(fields, rules, draft), index);
+      await patch(botId, from.id, { draft, attachments, draftId, ...positionFields(fields, next) });
+      if (input.telegramFileId && input.kind) {
+        void persistTelegramUpload({
+          botId,
+          telegramUserId: from.id,
+          field,
+          telegramFileId: input.telegramFileId,
+          kind: input.kind === "photo" ? "photo" : input.kind,
+          filename: input.filename,
+          mimeType: input.mimeType,
+          ownerId: `draft-${requestId}`,
+        })
+          .then(async (stored) => {
+            await attachUploadToDraft({
+              botId,
+              telegramUserId: from.id,
+              draftId,
+              field,
+              telegramFileId: input.telegramFileId!,
+              gridFsId: stored.gridFsId,
+              existingFileId: (existing) =>
+                existing && typeof existing === "object"
+                  ? String((existing as { fileId?: string; telegramFileId?: string }).fileId ?? (existing as { telegramFileId?: string }).telegramFileId ?? "")
+                  : "",
+              value: { ...answer, storageId: stored.gridFsId, fileId: stored.telegramFileId },
+            });
+            void ChatLogService.linkFile({
+              botId,
+              telegramUserId: from.id,
+              telegramFileId: input.telegramFileId!,
+              gridFsId: stored.gridFsId,
+              filename: stored.filename,
+            });
+          })
+          .catch((err) => {
+            logJson("error", "telegram", "FILE_STORE_FAILED", {
+              requestId,
+              botId,
+              field: field.name,
+              error: err instanceof Error ? err.message : String(err),
+            });
+          });
+      }
+      await this.askField(botId, from.id, chatId, String(state.requestTypeId), next);
       return;
     }
 
@@ -955,14 +1216,10 @@ export class TelegramConversationService {
         filename,
       });
 
-      const next = index + 1;
-      await patch(botId, from.id, { draft, attachments, fieldIndex: next });
+      draft = applyBranchingDraft(fields, rules, draft);
+      const next = nextAskIndex(fields, rules, draft, index);
+      await patch(botId, from.id, { draft, attachments, draftId, ...positionFields(fields, next) });
 
-      logJson("info", "telegram", "file_store_start", {
-        botId,
-        field: field.name,
-        kind,
-      });
       void persistTelegramUpload({
         botId,
         telegramUserId: from.id,
@@ -974,17 +1231,19 @@ export class TelegramConversationService {
         ownerId: `draft-${requestId}`,
       })
         .then(async (stored) => {
-          const current = await conv(botId, from.id);
-          const nextDraft = { ...((current.draft as Record<string, unknown>) ?? {}) };
-          const existing = draftValue(nextDraft, field);
-          const existingId =
-            existing && typeof existing === "object"
-              ? String((existing as { telegramFileId?: string }).telegramFileId ?? "")
-              : String(existing ?? "");
-          if (existingId && existingId !== fileId) return;
-          writeDraft(nextDraft, field, stored);
-          const nextAtt = [...new Set([...((current.attachments as string[]) ?? []), stored.gridFsId])];
-          await patch(botId, from.id, { draft: nextDraft, attachments: nextAtt });
+          await attachUploadToDraft({
+            botId,
+            telegramUserId: from.id,
+            draftId,
+            field,
+            telegramFileId: fileId,
+            gridFsId: stored.gridFsId,
+            existingFileId: (existing) =>
+              existing && typeof existing === "object"
+                ? String((existing as { telegramFileId?: string }).telegramFileId ?? "")
+                : String(existing ?? ""),
+            value: stored,
+          });
           void ChatLogService.linkFile({
             botId,
             telegramUserId: from.id,
@@ -992,23 +1251,14 @@ export class TelegramConversationService {
             gridFsId: stored.gridFsId,
             filename: stored.filename,
           });
-          logJson("info", "telegram", "file_store_ok", {
-            requestId,
-            botId,
-            field: field.name,
-            gridFsId: stored.gridFsId,
-          });
         })
         .catch((err) => {
-          const message = err instanceof Error ? err.message : String(err);
           logJson("error", "telegram", "FILE_STORE_FAILED", {
             requestId,
             botId,
             field: field.name,
-            error: message,
+            error: err instanceof Error ? err.message : String(err),
           });
-          console.error("FILE_STORE_FAILED", { requestId, botId, field: field.name, error: message });
-          console.error(err);
         });
 
       await this.askField(botId, from.id, chatId, String(state.requestTypeId), next);
@@ -1022,9 +1272,6 @@ export class TelegramConversationService {
       return;
     }
     writeDraft(draft, field, persistValue(field, value));
-
-    const next = index + 1;
-    await patch(botId, from.id, { draft, attachments, fieldIndex: next });
-    await this.askField(botId, from.id, chatId, String(state.requestTypeId), next);
+    await goNext();
   }
 }

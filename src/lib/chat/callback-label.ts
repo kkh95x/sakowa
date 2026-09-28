@@ -12,9 +12,9 @@ export function callbackButtonLabel(
   }
   if (data === "confirm:yes") return "تأكيد";
   if (data === "confirm:no") return "إلغاء";
-  if (data === "menu:my") return "طلباتي";
+  if (data === "menu:my") return "شكاواي";
   if (data === "menu:help") return "المساعدة";
-  if (data === "menu:requests") return "الخدمات";
+  if (data === "menu:requests") return "أنواع الشكاوى";
   if (data.startsWith("y:")) return "نعم";
   if (data.startsWith("n:")) return "لا";
   if (data.startsWith("d:")) return "تم";

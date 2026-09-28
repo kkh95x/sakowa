@@ -21,7 +21,8 @@ export class GridFSStorageService {
     const allowGenericBinary =
       params.purpose === "ORDER_ATTACHMENT" ||
       params.purpose === "PAYMENT_PROOF" ||
-      params.purpose === "ADMIN_ATTACHMENT";
+      params.purpose === "ADMIN_ATTACHMENT" ||
+      params.purpose === "REQUEST_IMAGE";
     if (!isAllowedUpload(mimeType, safeName, allowGenericBinary)) throw new Error("INVALID_MIME");
     if (params.buffer.length > MAX_SIZE) throw new Error("FILE_TOO_LARGE");
     const bucket = await getGridFSBucket();

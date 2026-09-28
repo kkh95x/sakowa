@@ -111,7 +111,7 @@ export class WebPushService {
       return;
     }
 
-    const url = notification.orderId ? `/orders/${notification.orderId}` : "/notifications";
+    const url = notification.orderId ? `/complaints/${notification.orderId}` : "/notifications";
     const result = await this.sendToUser(String(notification.recipientUserId), {
       title: String(notification.title),
       body: String(notification.message),

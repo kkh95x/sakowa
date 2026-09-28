@@ -1,11 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { OrderFilterBuilder } from "../src/lib/orders/filter-builder";
 import { OrderService, OrderStatusService } from "../src/lib/orders/order-service";
-import { parseFieldAnswer, displayChoice } from "../src/lib/orders/field-answer";
+import { parseFieldAnswer, displayChoice, displayFieldAnswer } from "../src/lib/orders/field-answer";
 import { resolveUploadMime, isAllowedUpload } from "../src/lib/storage/mime";
 import { normalizeTelegramFilePath, pinnedTelegramIp } from "../src/lib/telegram/api";
 import { duplicateFieldNames, ensureUniqueFieldNames, nextFieldName } from "../src/lib/requests/field-names";
-import { parseAdminFields, hasAdminFields } from "../src/lib/orders/admin-fields";
+import { adminFieldsSet, parseAdminFields, hasAdminFields } from "../src/lib/orders/admin-fields";
 import { callbackButtonLabel, isSlashCommand } from "../src/lib/chat/callback-label";
 import { ChatLogService, chatTextFingerprint } from "../src/lib/chat/chat-log-service";
 import { sanitizeAuditValue, toAuditSnapshot } from "../src/lib/audit/audit";
@@ -35,8 +35,15 @@ describe("OrderStatusService", () => {
   it("allows pending to reviewing", () => {
     expect(OrderStatusService.canTransition("PENDING", "REVIEWING")).toBe(true);
   });
-  it("blocks archived to pending", () => {
+  it("blocks closed to pending", () => {
+    expect(OrderStatusService.canTransition("CLOSED", "PENDING")).toBe(false);
     expect(OrderStatusService.canTransition("ARCHIVED", "PENDING")).toBe(false);
+  });
+  it("allows pending to reviewing and in progress after review", () => {
+    expect(OrderStatusService.canTransition("PENDING", "REVIEWING")).toBe(true);
+    expect(OrderStatusService.canTransition("REVIEWING", "IN_PROGRESS")).toBe(true);
+    expect(OrderStatusService.canTransition("IN_PROGRESS", "RESOLVED")).toBe(true);
+    expect(OrderStatusService.canTransition("PENDING", "IN_PROGRESS")).toBe(false);
   });
 });
 
@@ -245,7 +252,7 @@ describe("order telegram commands", () => {
     expect(orderSlashCommand("ORD-00012")).toBe("o_00012");
     expect(formatOrderCommandLine("ORD-00012", "PENDING")).toBe("\u2066ORD-00012\u2069 - قيد الانتظار");
     expect(formatOrderCommandLine("ORD-00012", "COMPLETED", "تجديد جواز")).toBe(
-      "\u2066ORD-00012\u2069 - تجديد جواز - منجزة",
+      "\u2066ORD-00012\u2069 - تجديد جواز - تم الحل",
     );
   });
 
@@ -253,7 +260,7 @@ describe("order telegram commands", () => {
     expect(orderDigitsFromCommand("/o_00012")).toBe(12);
     expect(orderDigitsFromCommand("/o_00012@MyBot")).toBe(12);
     expect(orderDigitsFromCommand("/orders")).toBeNull();
-    expect(orderNumberLookup(12)).toEqual({ $regex: "^ORD-0*12$" });
+    expect(orderNumberLookup(12)).toEqual({ $regex: "^(ORD|SHK)-0*12$" });
   });
 
   it("paginates my-orders at 5 per page with next/previous", () => {
@@ -272,26 +279,121 @@ describe("order telegram commands", () => {
 });
 
 describe("order admin fields", () => {
-  it("parses empty and filled admin-only fields", () => {
-    expect(parseAdminFields(undefined)).toEqual({
-      shamCashReceiptNumber: "",
-      adminNotes: "",
-      invoiceNumber: "",
-      paymentDate: "",
-      invoiceFileId: null,
-      invoiceFilename: null,
-    });
+  const legacy = {
+    shamCashReceiptNumber: "12345",
+    adminNotes: "ملاحظة قديمة",
+    invoiceNumber: "INV-9",
+    paymentDate: new Date("2026-08-31T00:00:00Z"),
+    invoiceFileId: "64b000000000000000000001",
+    invoiceFilename: "invoice.pdf",
+  };
+
+  function applySet(doc: Record<string, unknown>, set: Record<string, unknown>) {
+    const out: Record<string, unknown> = structuredClone(doc);
+    for (const [path, value] of Object.entries(set)) {
+      const [head, tail] = path.split(".");
+      if (!tail) out[head] = value;
+      else out[head] = { ...(out[head] as Record<string, unknown>), [tail]: value };
+    }
+    return out;
+  }
+
+  it("parses only notes and attachment", () => {
+    expect(parseAdminFields(undefined)).toEqual({ adminNotes: "", attachmentFileId: null, attachmentFilename: null });
     const filled = parseAdminFields({
-      shamCashReceiptNumber: "  12345  ",
-      adminNotes: "ملاحظة",
-      invoiceNumber: "INV-9",
-      paymentDate: "2026-08-31",
-      invoiceFileId: "file1",
-      invoiceFilename: "invoice.pdf",
+      adminNotes: "  ملاحظة  ",
+      attachmentFileId: "64b000000000000000000002",
+      attachmentFilename: "scan.pdf",
     });
-    expect(filled.shamCashReceiptNumber).toBe("12345");
-    expect(filled.paymentDate).toBe("2026-08-31");
+    expect(filled).toEqual({
+      adminNotes: "ملاحظة",
+      attachmentFileId: "64b000000000000000000002",
+      attachmentFilename: "scan.pdf",
+    });
     expect(hasAdminFields(filled)).toBe(true);
     expect(hasAdminFields(parseAdminFields({}))).toBe(false);
+  });
+
+  it("does not expose legacy payment keys", () => {
+    const parsed = parseAdminFields(legacy);
+    expect(Object.keys(parsed).sort()).toEqual(["adminNotes", "attachmentFileId", "attachmentFilename"]);
+    expect(parsed.adminNotes).toBe("ملاحظة قديمة");
+    expect(parsed.attachmentFileId).toBeNull();
+  });
+
+  it("updates legacy complaints with dotted paths so old keys survive", () => {
+    const next = { adminNotes: "جديد", attachmentFileId: "64b000000000000000000003", attachmentFilename: "a.png" };
+    const set = adminFieldsSet(legacy, next);
+    expect(Object.keys(set).every((k) => k.startsWith("adminFields."))).toBe(true);
+    const after = applySet({ adminFields: legacy }, set).adminFields as Record<string, unknown>;
+    expect(after).toMatchObject({
+      shamCashReceiptNumber: "12345",
+      invoiceNumber: "INV-9",
+      invoiceFileId: "64b000000000000000000001",
+      invoiceFilename: "invoice.pdf",
+      ...next,
+    });
+    expect(after.paymentDate).toEqual(new Date("2026-08-31T00:00:00Z"));
+  });
+
+  it("sets the whole object when adminFields is missing", () => {
+    const next = { adminNotes: "", attachmentFileId: null, attachmentFilename: null };
+    expect(adminFieldsSet(null, next)).toEqual({ adminFields: next });
+    expect(adminFieldsSet(undefined, next)).toEqual({ adminFields: next });
+  });
+});
+
+describe("displayFieldAnswer", () => {
+  const base = { id: "f", required: false, sensitive: false, order: 0, active: true };
+  const yesNo = [
+    { value: "yes", label: "نعم" },
+    { value: "no", label: "لا" },
+  ];
+
+  it("keeps TEXT answers as-is", () => {
+    const field = { ...base, name: "description", label: "الوصف", type: "TEXT" as const };
+    expect(displayFieldAnswer(field, "النت ضعيف").text).toBe("النت ضعيف");
+    expect(displayFieldAnswer({ ...field, options: yesNo }, "yes").text).toBe("yes");
+  });
+
+  it("maps RADIO values to option labels", () => {
+    const field = { ...base, name: "agree_image", label: "صورة؟", type: "RADIO" as const, options: yesNo };
+    expect(displayFieldAnswer(field, "yes")).toMatchObject({ kind: "text", text: "نعم" });
+    expect(displayFieldAnswer(field, "no")).toMatchObject({ kind: "text", text: "لا" });
+  });
+
+  it("maps SELECT values to option labels", () => {
+    const field = {
+      ...base,
+      name: "city",
+      label: "المدينة",
+      type: "SELECT" as const,
+      options: [
+        { value: "dam", label: "دمشق" },
+        { value: "alp", label: "حلب" },
+      ],
+    };
+    expect(displayFieldAnswer(field, "alp").text).toBe("حلب");
+  });
+
+  it("maps each CHECKBOX value and falls back per item", () => {
+    const field = {
+      ...base,
+      name: "services",
+      label: "الخدمات",
+      type: "CHECKBOX" as const,
+      options: [
+        { value: "net", label: "إنترنت" },
+        { value: "tv", label: "تلفاز" },
+      ],
+    };
+    expect(displayFieldAnswer(field, ["net", "tv"]).text).toBe("إنترنت، تلفاز");
+    expect(displayFieldAnswer(field, ["net", "legacy_x"]).text).toBe("إنترنت، legacy_x");
+  });
+
+  it("falls back to the raw stored value for unknown options", () => {
+    const field = { ...base, name: "agree_doc", label: "مستند؟", type: "RADIO" as const, options: yesNo };
+    expect(displayFieldAnswer(field, "maybe").text).toBe("maybe");
+    expect(displayFieldAnswer(field, undefined).kind).toBe("empty");
   });
 });

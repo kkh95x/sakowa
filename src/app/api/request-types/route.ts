@@ -1,6 +1,7 @@
 import { errorToResponse, json, withAuth } from "@/lib/api/http";
 import { RequestTypeService } from "@/lib/requests/request-type-service";
 import { z } from "zod";
+import { telegramPromptSchema } from "@/lib/requests/prompt-schema";
 
 export async function GET() {
   try {
@@ -16,6 +17,7 @@ export async function GET() {
           botId: r.botId,
           active: r.active,
           fields: r.fields,
+          branchingRules: r.branchingRules ?? [],
           telegramGroupId: r.telegramGroupId,
           description: r.description,
         };
@@ -30,10 +32,29 @@ const fieldSchema = z.object({
   id: z.string().optional().default(""),
   name: z.string().optional().default(""),
   label: z.string().optional().default(""),
-  type: z.string().default("TEXT"),
+  type: z.enum([
+    "TEXT",
+    "EMAIL",
+    "PASSWORD",
+    "NUMBER",
+    "PHONE",
+    "URL",
+    "DATE",
+    "DATETIME",
+    "SELECT",
+    "RADIO",
+    "CHECKBOX",
+    "TEXTAREA",
+    "FILE",
+    "IMAGE",
+    "INSTRUCTION",
+    "CONFIRMATION",
+    "DYNAMIC",
+  ]).default("TEXT"),
   placeholder: z.string().optional(),
   description: z.string().optional(),
   telegramMessage: z.string().optional(),
+  telegramPrompt: telegramPromptSchema.optional(),
   required: z.boolean().optional().default(true),
   sensitive: z.boolean().optional().default(false),
   validation: z
@@ -55,6 +76,18 @@ const schema = z.object({
   botId: z.string().min(1),
   description: z.string().optional(),
   fields: z.array(fieldSchema).optional(),
+  branchingRules: z
+    .array(
+      z.object({
+        id: z.string().optional().default(""),
+        sourceFieldId: z.string(),
+        operator: z.enum(["equals", "not_equals", "contains", "is_empty", "is_not_empty"]),
+        value: z.string().optional(),
+        action: z.enum(["show", "hide", "goto"]),
+        targetFieldId: z.string(),
+      }),
+    )
+    .optional(),
   active: z.boolean().optional(),
   telegramGroupId: z.string().nullable().optional(),
 });

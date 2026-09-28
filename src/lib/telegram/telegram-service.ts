@@ -14,7 +14,29 @@ import {
   telegramFetchFile,
   telegramFileUrl,
 } from "@/lib/telegram/api";
-import type { OrderStatus, RequestField } from "@/types";
+import type { OrderStatus, RequestField, TelegramPrompt, TelegramPromptBlock } from "@/types";
+import { STATUS_AR } from "@/lib/orders/complaint-status";
+import { statusUpdateTelegramText } from "@/lib/telegram/order-command";
+import { resolveFieldPromptBlocks, withPromptHint } from "@/lib/telegram/field-prompt";
+import { defaultWelcomeText, hasWelcomePrompt, resolveWelcomeBlocks } from "@/lib/telegram/welcome-prompt";
+import { TelegramMessageRenderer, type TelegramPromptSender } from "@/lib/telegram/message-renderer";
+
+export type CaptionableMessage = {
+  caption?: string;
+  photo?: unknown[];
+  document?: unknown;
+  video?: unknown;
+  audio?: unknown;
+  voice?: unknown;
+  animation?: unknown;
+};
+
+/** Media messages carry a caption, so they must be edited with editMessageCaption, not editMessageText. */
+export function isCaptionMessage(message: CaptionableMessage) {
+  return Boolean(
+    message.photo?.length || message.document || message.video || message.audio || message.voice || message.animation,
+  );
+}
 
 async function botToken(botId: string) {
   const db = await getDb();
@@ -106,14 +128,6 @@ async function telegramUpload(
   });
   return res.json();
 }
-
-const STATUS_AR: Record<OrderStatus, string> = {
-  PENDING: "قيد الانتظار",
-  REVIEWING: "قيد المراجعة",
-  COMPLETED: "منجزة",
-  REJECTED: "مرفوضة",
-  ARCHIVED: "مؤرشفة",
-};
 
 export class TelegramService {
   static webhookConfigured() {
@@ -293,7 +307,7 @@ export class TelegramService {
       .toArray();
     const commands = [
       { command: "start", description: "القائمة الرئيسية" },
-      { command: "orders", description: "طلباتي" },
+      { command: "orders", description: "شكاواي" },
       { command: "cancel", description: "إلغاء العملية الحالية" },
       ...types.slice(0, 90).map((t) => ({
         command: this.serviceCommand(String(t._id)),
@@ -324,21 +338,17 @@ export class TelegramService {
   static async revealInlineChoice(
     botId: string,
     chatId: number,
-    message: {
-      message_id?: number;
-      text?: string;
-      caption?: string;
-      photo?: unknown[];
-    },
+    message: CaptionableMessage & { message_id?: number; text?: string },
     choice: string,
   ): Promise<boolean> {
     const messageId = message.message_id;
     if (!messageId || !choice.trim()) return false;
-    const hasMedia = Boolean(message.photo?.length);
+    const hasMedia = isCaptionMessage(message);
     const previous = String((hasMedia ? message.caption : message.text) ?? "").trimEnd();
     const next = previous.includes(choice) ? previous : `${previous}\n\n${choice}`.trim();
     if (!next) return false;
     const token = await botToken(botId);
+    let error: string;
     try {
       const result = hasMedia
         ? await telegramCall(token, "editMessageCaption", {
@@ -353,10 +363,18 @@ export class TelegramService {
             text: next,
             reply_markup: { inline_keyboard: [] },
           });
-      return Boolean(result?.ok);
-    } catch {
-      return false;
+      if (result?.ok) return true;
+      error = String(result?.description ?? "EDIT_FAILED");
+    } catch (err) {
+      error = err instanceof Error ? err.message : String(err);
     }
+    logJson("warn", "telegram", "reveal_choice_edit_failed", { botId, messageId, hasMedia, error });
+    await telegramCall(token, "editMessageReplyMarkup", {
+      chat_id: chatId,
+      message_id: messageId,
+      reply_markup: { inline_keyboard: [] },
+    }).catch(() => null);
+    return false;
   }
 
   static async editReplyMarkup(
@@ -527,7 +545,14 @@ export class TelegramService {
     }
   }
 
-  static async sendDocument(botId: string, chatId: number, buffer: Buffer, filename: string, caption?: string) {
+  static async sendDocument(
+    botId: string,
+    chatId: number,
+    buffer: Buffer,
+    filename: string,
+    caption?: string,
+    extra?: Record<string, unknown>,
+  ) {
     const token = await botToken(botId);
     const lower = filename.toLowerCase();
     const contentType = lower.endsWith(".pdf")
@@ -551,6 +576,7 @@ export class TelegramService {
                       : "application/octet-stream";
     const fields: Record<string, string> = { chat_id: String(chatId) };
     if (caption) fields.caption = caption.slice(0, 1024);
+    if (extra?.reply_markup) fields.reply_markup = JSON.stringify(extra.reply_markup);
     const json = await telegramUpload(token, "sendDocument", fields, {
       fieldName: "document",
       filename: asciiFilename(filename, "file.bin"),
@@ -571,7 +597,14 @@ export class TelegramService {
     return json;
   }
 
-  static async sendPhoto(botId: string, chatId: number, buffer: Buffer, filename: string, caption?: string) {
+  static async sendPhoto(
+    botId: string,
+    chatId: number,
+    buffer: Buffer,
+    filename: string,
+    caption?: string,
+    extra?: Record<string, unknown>,
+  ) {
     const token = await botToken(botId);
     const lower = filename.toLowerCase();
     const contentType = lower.endsWith(".png")
@@ -581,6 +614,7 @@ export class TelegramService {
         : "image/jpeg";
     const fields: Record<string, string> = { chat_id: String(chatId) };
     if (caption) fields.caption = caption.slice(0, 1024);
+    if (extra?.reply_markup) fields.reply_markup = JSON.stringify(extra.reply_markup);
     const json = await telegramUpload(token, "sendPhoto", fields, {
       fieldName: "photo",
       filename: asciiFilename(filename, contentType === "image/png" ? "photo.png" : "photo.jpg"),
@@ -657,67 +691,92 @@ export class TelegramService {
     }
   }
 
+  /**
+   * Sends one composed Telegram message (text/image/document blocks, in order).
+   * Shared by field questions and the bot welcome message; `extra` (inline keyboard)
+   * is attached to the last block by the renderer.
+   */
+  static async sendPromptBlocks(
+    botId: string,
+    chatId: number,
+    blocks: TelegramPromptBlock[],
+    options: { fallbackText: string; extra?: Record<string, unknown>; event: string; logData?: Record<string, unknown> },
+  ) {
+    const steps = TelegramMessageRenderer.plan(blocks);
+    const { GridFSStorageService } = await import("@/lib/storage/gridfs");
+    const readFile = async (storageId: string) => {
+      const file = await GridFSStorageService.readBuffer(storageId);
+      if (!file?.buffer?.length) throw new Error("PROMPT_MEDIA_MISSING");
+      return file;
+    };
+    const sender: TelegramPromptSender = {
+      sendText: async (text, extra) => {
+        const result = await this.sendMessage(botId, chatId, text, extra);
+        if (!result?.ok) throw new Error(String(result?.description ?? "SEND_MESSAGE_FAILED"));
+        return result;
+      },
+      sendPhoto: async (storageId, fileName, extra) => {
+        const file = await readFile(storageId);
+        return this.sendPhoto(botId, chatId, file.buffer, fileName || file.filename, undefined, extra);
+      },
+      sendDocument: async (storageId, fileName, extra) => {
+        const file = await readFile(storageId);
+        return this.sendDocument(botId, chatId, file.buffer, fileName || file.filename, undefined, extra);
+      },
+      log: (level, event, data) => logJson(level, "telegram", event, { botId, chatId, ...data }),
+    };
+    const result = await TelegramMessageRenderer.send(steps, sender, {
+      fallbackText: options.fallbackText,
+      extra: options.extra,
+    });
+    logJson(result.status === "complete" ? "info" : "error", "telegram", options.event, {
+      botId,
+      chatId,
+      ...options.logData,
+      status: result.status,
+      blocks: steps.map((s) => s.kind),
+      failed: result.failed,
+      degraded: result.degraded,
+      buttonsResent: result.buttonsResent,
+    });
+    return result;
+  }
+
+  /** Sends a field's question message (text/image/document blocks, in order). */
   static async sendFieldPrompt(
     botId: string,
     chatId: number,
-    prompt: string,
-    field: { imageFileId?: string | null; attachmentFileId?: string | null },
-    extra?: Record<string, unknown>,
+    field: Pick<RequestField, "label" | "telegramMessage" | "telegramPrompt" | "imageFileId" | "attachmentFileId">,
+    options: { hint?: string; extra?: Record<string, unknown> } = {},
   ) {
-    const mediaId = field.imageFileId || field.attachmentFileId;
-    if (!mediaId) {
-      return this.sendMessage(botId, chatId, prompt, extra);
-    }
-    const { logJson } = await import("@/lib/log");
-    try {
-      const { GridFSStorageService } = await import("@/lib/storage/gridfs");
-      const file = await GridFSStorageService.readBuffer(String(mediaId));
-      if (!file?.buffer?.length) {
-        logJson("warn", "telegram", "field_media_missing", { botId, mediaId: String(mediaId) });
-        return this.sendMessage(botId, chatId, prompt, extra);
-      }
-      const isImage = String(file.mimeType || "").startsWith("image/");
-      logJson("info", "telegram", "field_media_sending", {
-        botId,
-        mediaId: String(mediaId),
-        bytes: file.buffer.length,
-        mimeType: file.mimeType,
-        as: isImage ? "photo" : "document",
-      });
-      if (isImage) {
-        try {
-          const sent = await this.sendPhoto(botId, chatId, file.buffer, file.filename, prompt);
-          if (extra?.reply_markup) {
-            await this.sendMessage(botId, chatId, "اختر من الأزرار:", extra);
-          }
-          return sent;
-        } catch (photoErr) {
-          logJson("warn", "telegram", "send_photo_failed_fallback_document", {
-            botId,
-            mediaId: String(mediaId),
-            error: photoErr instanceof Error ? photoErr.message : String(photoErr),
-          });
-          const sent = await this.sendDocument(botId, chatId, file.buffer, file.filename, prompt);
-          if (extra?.reply_markup) {
-            await this.sendMessage(botId, chatId, "اختر من الأزرار:", extra);
-          }
-          return sent;
-        }
-      }
-      const sent = await this.sendDocument(botId, chatId, file.buffer, file.filename, prompt);
-      if (extra?.reply_markup) {
-        await this.sendMessage(botId, chatId, "اختر من الأزرار:", extra);
-      }
-      return sent;
-    } catch (err) {
-      logJson("error", "telegram", "field_media_send_failed", {
-        botId,
-        mediaId: String(mediaId),
-        error: err instanceof Error ? err.message : String(err),
-      });
-      console.error("field_media_send_failed", err);
-      return this.sendMessage(botId, chatId, prompt, extra);
-    }
+    return this.sendPromptBlocks(
+      botId,
+      chatId,
+      withPromptHint(resolveFieldPromptBlocks(field), options.hint),
+      {
+        fallbackText: [field.label, options.hint].filter(Boolean).join("\n\n") || "—",
+        extra: options.extra,
+        event: "FIELD_PROMPT_SENT",
+        logData: { field: field.label },
+      },
+    );
+  }
+
+  /**
+   * Sends the bot's /start screen: the administrator's composed welcome blocks, or the
+   * default greeting. The complaint-type keyboard rides on the last delivered block.
+   */
+  static async sendWelcome(
+    botId: string,
+    chatId: number,
+    params: { bot?: { welcomePrompt?: TelegramPrompt | null } | null; hasActiveTypes: boolean; extra?: Record<string, unknown> },
+  ) {
+    return this.sendPromptBlocks(botId, chatId, resolveWelcomeBlocks(params.bot, params.hasActiveTypes), {
+      fallbackText: defaultWelcomeText(params.hasActiveTypes),
+      extra: params.extra,
+      event: "WELCOME_PROMPT_SENT",
+      logData: { custom: hasWelcomePrompt(params.bot), hasActiveTypes: params.hasActiveTypes },
+    });
   }
 
   static async notifyUserStatus(
@@ -725,15 +784,9 @@ export class TelegramService {
     status: OrderStatus,
     message?: string,
     attachmentFileId?: string,
+    reason?: string,
   ) {
-    const text = [
-      "تحديث على طلبك",
-      `#${order.orderNumber}`,
-      `الحالة: ${STATUS_AR[status]}`,
-      message ? `\n${message}` : "",
-    ]
-      .filter(Boolean)
-      .join("\n");
+    const text = statusUpdateTelegramText({ orderNumber: order.orderNumber, status, message, reason });
     const botId = String(order.botId);
     const chatId = Number(order.chatId);
     if (attachmentFileId) {
@@ -779,9 +832,9 @@ export class TelegramService {
     });
     if (!group) return;
     const text = [
-      "🆕 طلب جديد",
+      "🆕 شكوى جديدة",
       `#${params.orderNumber}`,
-      `الخدمة:\n${request.name}`,
+      `نوع الشكوى:\n${request.name}`,
       `المستخدم:\n${params.telegramUsername ? `@${params.telegramUsername}` : "غير متوفر"}`,
       `Telegram ID:\n${params.telegramUserId}`,
       "الحالة:\nقيد الانتظار",
@@ -809,7 +862,7 @@ export class TelegramService {
     const actor = await db.collection(collections.users).findOne({ _id: new ObjectId(actorId) });
     if (!group) return;
     const text = [
-      "🔄 تحديث طلب",
+      "🔄 تحديث شكوى",
       `#${order.orderNumber}`,
       `من:\n${STATUS_AR[from]}`,
       `إلى:\n${STATUS_AR[to]}`,

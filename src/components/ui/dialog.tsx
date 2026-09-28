@@ -49,13 +49,13 @@ export function Dialog({
       <DialogPrimitive.Portal>
         <DialogPrimitive.Overlay
           className={cn(
-            "fixed inset-0 bg-black/45 backdrop-blur-[2px]",
+            "fixed inset-0 bg-[#1f2623]/40 backdrop-blur-[1px] data-[state=open]:animate-[dialog-fade_160ms_ease-out]",
             nested ? "z-[70]" : "z-50",
           )}
         />
         <DialogPrimitive.Content
           className={cn(
-            "fixed left-1/2 top-1/2 flex max-h-[min(calc(100dvh-1.5rem),880px)] min-h-0 -translate-x-1/2 -translate-y-1/2 flex-col overflow-y-auto overscroll-contain rounded-3xl border border-border bg-card shadow-2xl outline-none [-webkit-overflow-scrolling:touch]",
+            "fixed left-1/2 top-1/2 flex max-h-[min(calc(100dvh-1.5rem),880px)] min-h-0 -translate-x-1/2 -translate-y-1/2 flex-col overflow-y-auto overscroll-contain rounded-3xl border border-border bg-card shadow-pop outline-none [-webkit-overflow-scrolling:touch] data-[state=open]:animate-[dialog-in_180ms_cubic-bezier(0.16,1,0.3,1)]",
             nested ? "z-[71]" : "z-50",
             SIZE_CLASS[size],
             className,
@@ -71,9 +71,11 @@ export function Dialog({
               <div className="min-w-0 flex-1">{header}</div>
             ) : (
               <div className="min-w-0 space-y-1">
-                <DialogPrimitive.Title className="text-lg font-bold leading-tight text-inherit">{title}</DialogPrimitive.Title>
+                <DialogPrimitive.Title className="text-base font-semibold leading-snug text-inherit sm:text-lg">
+                  {title}
+                </DialogPrimitive.Title>
                 {description ? (
-                  <DialogPrimitive.Description className="text-sm text-muted-foreground">
+                  <DialogPrimitive.Description className="text-sm leading-relaxed text-muted-foreground">
                     {description}
                   </DialogPrimitive.Description>
                 ) : (
@@ -87,7 +89,7 @@ export function Dialog({
             ) : null}
             {headerActions}
             <DialogPrimitive.Close
-              className="rounded-xl p-1.5 text-muted-foreground transition hover:bg-muted hover:text-foreground"
+              className="-me-1.5 -mt-0.5 flex size-9 shrink-0 items-center justify-center rounded-xl text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
               aria-label={ar.cancel}
             >
               <X className="size-5" />
@@ -101,7 +103,7 @@ export function Dialog({
           {footer ? (
             <footer
               className={cn(
-                "sticky bottom-0 z-10 flex shrink-0 flex-wrap items-center justify-end gap-2 border-t border-border bg-card px-5 py-3 max-sm:pb-[max(0.75rem,env(safe-area-inset-bottom))] sm:px-6",
+                "sticky bottom-0 z-10 flex shrink-0 flex-wrap items-center justify-end gap-2 border-t border-border bg-sidebar px-5 py-3 max-sm:pb-[max(0.75rem,env(safe-area-inset-bottom))] sm:px-6",
                 footerClassName,
               )}
             >

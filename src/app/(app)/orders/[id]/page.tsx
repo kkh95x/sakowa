@@ -1,39 +1,58 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { useParams } from "next/navigation";
-import { Ban, ClipboardList, MessageCircle, MessageSquare, Paperclip, RefreshCw } from "lucide-react";
+import {
+  Ban,
+  ChevronLeft,
+  ClipboardList,
+  FileText,
+  MessageCircle,
+  MessageSquare,
+  MoreHorizontal,
+  Paperclip,
+  Pencil,
+  RefreshCw,
+  Upload,
+  UserRound,
+} from "lucide-react";
 import { ar } from "@/i18n/ar";
-import { Button } from "@/components/ui/button";
+import { Button, buttonClass } from "@/components/ui/button";
 import { Dialog } from "@/components/ui/dialog";
-import { Input } from "@/components/ui/input";
+import { Input, Textarea, FieldHint } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { formatTime } from "@/lib/utils";
+import { Card, CardHeader, EmptyState, Skeleton } from "@/components/ui/card";
+import { Dropdown, DropdownItem, DropdownSeparator } from "@/components/ui/dropdown";
+import { cn, formatTime, relativeTime } from "@/lib/utils";
 import { useToast } from "@/components/ui/toast";
 import { FieldAnswerMedia } from "@/components/orders/field-answer-media";
 import { OrderChatDialog } from "@/components/orders/order-chat-dialog";
 import { AdminFieldsDialog } from "@/components/orders/admin-fields-dialog";
-import { parseFieldAnswer } from "@/lib/orders/field-answer";
-import { parseAdminFields, formatPaymentDate } from "@/lib/orders/admin-fields";
-import type { OrderAdminFields, OrderStatus, RequestField } from "@/types";
+import { StatusBadge } from "@/components/orders/status-badge";
+import { StatusChangeDialog } from "@/components/orders/status-change-dialog";
+import { StatusHistoryItem, latestStatusContext, StatusContextNotes } from "@/components/orders/status-history";
+import { buildOrderFieldRows } from "@/lib/orders/order-field-rows";
+import { parseAdminFields } from "@/lib/orders/admin-fields";
+import { TRANSITIONS, canonicalizeStatus } from "@/lib/orders/complaint-status";
+import type { OrderAdminFields, RequestField } from "@/types";
 
-const STATUS_LABEL: Record<string, string> = {
-  PENDING: ar.pending,
-  REVIEWING: ar.reviewing,
-  COMPLETED: ar.completed,
-  REJECTED: ar.rejected,
-  ARCHIVED: ar.archived,
-};
-
-const TRANSITIONS: Record<string, OrderStatus[]> = {
-  PENDING: ["REVIEWING", "REJECTED", "ARCHIVED"],
-  REVIEWING: ["COMPLETED", "REJECTED", "ARCHIVED"],
-  COMPLETED: ["ARCHIVED"],
-  REJECTED: ["ARCHIVED"],
-  ARCHIVED: [],
-};
+const FILE_ACCEPT =
+  ".png,.jpg,.jpeg,.webp,.pdf,.txt,.csv,.zip,.doc,.docx,.xls,.xlsx,.ppt,.pptx,image/*,application/pdf";
 
 type DialogKind = "status" | "message" | "attach" | "block" | null;
+
+function referencedFileIds(values: Record<string, unknown>) {
+  const ids = new Set<string>();
+  for (const value of Object.values(values)) {
+    if (value && typeof value === "object") {
+      const v = value as { storageId?: unknown; gridFsId?: unknown };
+      if (v.storageId) ids.add(String(v.storageId));
+      if (v.gridFsId) ids.add(String(v.gridFsId));
+    }
+  }
+  return ids;
+}
 
 export default function OrderDetailsPage() {
   const { id } = useParams<{ id: string }>();
@@ -43,7 +62,6 @@ export default function OrderDetailsPage() {
   const [chatOpen, setChatOpen] = useState(false);
   const [adminOpen, setAdminOpen] = useState(false);
   const [message, setMessage] = useState("");
-  const [statusFile, setStatusFile] = useState<File | null>(null);
   const [attachFile, setAttachFile] = useState<File | null>(null);
   const [reason, setReason] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
@@ -64,73 +82,33 @@ export default function OrderDetailsPage() {
     | null
     | undefined;
 
-  const fieldRows = useMemo(() => {
-    const defs = [...(requestType?.fields ?? [])]
-      .filter((f) => f.active !== false && f.type !== "INSTRUCTION")
-      .sort((a, b) => a.order - b.order);
-    const values = (order?.fields as Record<string, unknown>) ?? {};
-    if (defs.length) {
-      return defs.map((f) => ({
-        key: f.name,
-        label: f.label || f.name,
-        question: f.telegramMessage || f.label || f.name,
-        type: f.type,
-        answer: parseFieldAnswer(values[f.name], f.type),
-      }));
-    }
-    return Object.entries(values).map(([key, value]) => ({
-      key,
-      label: key,
-      question: key,
-      type: "TEXT",
-      answer: parseFieldAnswer(value),
-    }));
-  }, [order, requestType]);
+  const fieldRows = useMemo(
+    () =>
+      buildOrderFieldRows(
+        (order?.fields as Record<string, unknown>) ?? {},
+        requestType?.fields ?? [],
+        order?.formFields,
+      ),
+    [order, requestType],
+  );
 
-  const nextStatuses = order ? TRANSITIONS[String(order.status)] ?? [] : [];
+  const extraFiles = useMemo(() => {
+    const all = ((order?.attachments as unknown[]) ?? []).map(String).filter(Boolean);
+    const used = referencedFileIds((order?.fields as Record<string, unknown>) ?? {});
+    for (const h of history) if (h.attachmentFileId) used.add(String(h.attachmentFileId));
+    return [...new Set(all)].filter((fileId) => !used.has(fileId));
+  }, [order, history]);
+
+  const nextStatuses = order ? TRANSITIONS[canonicalizeStatus(order.status)] ?? [] : [];
   const adminFields = parseAdminFields(order?.adminFields);
+
+  const statusContext = order ? latestStatusContext(history, order.status) : null;
 
   function closeDialog() {
     setDialog(null);
     setMessage("");
-    setStatusFile(null);
     setAttachFile(null);
     setReason("");
-  }
-
-  async function change(status: OrderStatus) {
-    setBusy(`status:${status}`);
-    let attachmentFileId: string | undefined;
-    if (statusFile) {
-      const fd = new FormData();
-      fd.append("file", statusFile);
-      fd.append("ownerId", id);
-      const up = await fetch("/api/uploads", { method: "POST", body: fd });
-      if (!up.ok) {
-        setBusy(null);
-        toast(ar.updateFailed);
-        return;
-      }
-      const upData = await up.json();
-      attachmentFileId = String(upData.fileId);
-    }
-    const res = await fetch(`/api/orders/${id}/status`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        status,
-        message: message || undefined,
-        attachmentFileId,
-      }),
-    });
-    setBusy(null);
-    if (!res.ok) {
-      toast(ar.updateFailed);
-      return;
-    }
-    toast(ar.toast.orderUpdated);
-    closeDialog();
-    load();
   }
 
   async function sendMessage() {
@@ -202,190 +180,289 @@ export default function OrderDetailsPage() {
     }
   }
 
-  if (!order) return <div className="text-sm text-muted-foreground">{ar.loading}</div>;
+  if (!order) {
+    return (
+      <div className="space-y-5" aria-busy="true">
+        <Skeleton className="h-28 w-full rounded-2xl" />
+        <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_20rem]">
+          <Skeleton className="h-80 w-full rounded-2xl" />
+          <Skeleton className="h-56 w-full rounded-2xl" />
+        </div>
+      </div>
+    );
+  }
 
+  const orderId = typeof id === "string" ? id : Array.isArray(id) ? id[0] : null;
   const telegramHref = order.telegramUsername
     ? `https://t.me/${String(order.telegramUsername).replace(/^@/, "")}`
     : null;
+  const canChangeStatus = nextStatuses.length > 0;
+
+  const moreMenu = (
+    <Dropdown
+      trigger={
+        <Button variant="outline" size="icon" aria-label={ar.moreActions} title={ar.moreActions}>
+          <MoreHorizontal className="size-4" />
+        </Button>
+      }
+    >
+      <DropdownItem icon={<MessageSquare />} onSelect={() => setDialog("message")}>
+        {ar.sendMessage}
+      </DropdownItem>
+      <DropdownItem icon={<Paperclip />} onSelect={() => setDialog("attach")}>
+        {ar.attachFile}
+      </DropdownItem>
+      <DropdownItem icon={<ClipboardList />} onSelect={() => setAdminOpen(true)}>
+        {ar.editAdminFields}
+      </DropdownItem>
+      <DropdownSeparator />
+      <DropdownItem icon={<Ban />} danger onSelect={() => setDialog("block")}>
+        {ar.block}
+      </DropdownItem>
+    </Dropdown>
+  );
 
   return (
-    <div className="mx-auto flex max-w-5xl flex-col gap-5">
-      <div className="rounded-3xl border border-border bg-card p-5 shadow-sm">
-        <div className="flex flex-wrap items-start justify-between gap-3">
-          <div>
-            <h1 className="text-2xl font-bold tracking-tight">{String(order.orderNumber)}</h1>
-            <p className="mt-1 text-sm text-muted-foreground">
-              {requestType?.name ? `${requestType.name} · ` : null}
-              {STATUS_LABEL[String(order.status)] ?? String(order.status)}
-            </p>
-          </div>
-          <div className="rounded-2xl bg-muted/60 px-3 py-2 text-sm">
-            {formatTime(String(order.createdAt))}
-          </div>
-        </div>
-
-        <div className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-          <div className="rounded-2xl bg-muted/40 px-3 py-2 text-sm">
-            <div className="text-xs text-muted-foreground">{ar.telegramName}</div>
-            <div className="font-medium">{String(order.telegramName || "—")}</div>
-          </div>
-          <div className="rounded-2xl bg-muted/40 px-3 py-2 text-sm">
-            <div className="text-xs text-muted-foreground">{ar.telegramUsername}</div>
-            <div className="font-medium">
-              {telegramHref ? (
-                <a className="text-primary underline" href={telegramHref} target="_blank" rel="noreferrer">
-                  @{String(order.telegramUsername)}
-                </a>
-              ) : (
-                "—"
-              )}
+    <div className="space-y-5 pb-20 lg:pb-0">
+      <Card className="p-4 sm:p-5">
+        <nav aria-label={ar.navComplaints} className="mb-2 flex items-center gap-1 text-xs text-muted-foreground">
+          <span>{ar.navComplaints}</span>
+          {requestType?.id ? (
+            <>
+              <ChevronLeft className="size-3.5" />
+              <Link href={`/requests/${requestType.id}?status=${canonicalizeStatus(order.status)}`} className="hover:text-primary">
+                {requestType.name}
+              </Link>
+            </>
+          ) : null}
+        </nav>
+        <div className="flex flex-wrap items-start justify-between gap-4">
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-2.5">
+              <h1 className="text-xl font-semibold tabular-nums tracking-tight sm:text-2xl" dir="ltr">
+                {String(order.orderNumber)}
+              </h1>
+              <StatusBadge status={order.status} />
             </div>
-          </div>
-          <div className="rounded-2xl bg-muted/40 px-3 py-2 text-sm">
-            <div className="text-xs text-muted-foreground">{ar.telegramId}</div>
-            <div className="font-medium">{String(order.telegramUserId)}</div>
-          </div>
-          <div className="rounded-2xl bg-muted/40 px-3 py-2 text-sm">
-            <div className="text-xs text-muted-foreground">{ar.status}</div>
-            <div className="font-medium">{STATUS_LABEL[String(order.status)]}</div>
-          </div>
-        </div>
-      </div>
-
-      <div className="space-y-3">
-        <h2 className="text-lg font-semibold">{ar.answers}</h2>
-        {fieldRows.map((row) => (
-          <div key={row.key} className="overflow-hidden rounded-3xl border border-border bg-card shadow-sm">
-            <div className="border-b border-border bg-muted/35 px-4 py-3">
-              <div className="text-sm font-semibold">{row.label}</div>
-              <div className="mt-1 text-xs text-muted-foreground">
-                {ar.userQuestion}: {row.question}
-              </div>
-            </div>
-            <div className="px-4 py-4">
-              <div className="text-xs font-medium text-muted-foreground">{ar.userAnswer}</div>
-              {row.answer.kind === "text" || row.answer.kind === "empty" ? (
-                <div className="mt-1 text-base font-medium leading-relaxed">{row.answer.text}</div>
+            <dl className="mt-2 flex flex-wrap gap-x-5 gap-y-1 text-sm text-muted-foreground">
+              {requestType?.name ? (
+                <div className="flex gap-1.5">
+                  <dt className="sr-only">{ar.complaintType}</dt>
+                  <dd className="font-medium text-foreground/80">{requestType.name}</dd>
+                </div>
               ) : null}
-              <FieldAnswerMedia orderId={id} fieldName={row.key} answer={row.answer} />
-            </div>
+              <div className="flex gap-1.5">
+                <dt>{ar.createdAt}:</dt>
+                <dd>{formatTime(String(order.createdAt))}</dd>
+              </div>
+              {order.updatedAt ? (
+                <div className="flex gap-1.5">
+                  <dt>{ar.lastUpdated}:</dt>
+                  <dd>{relativeTime(String(order.updatedAt))}</dd>
+                </div>
+              ) : null}
+            </dl>
           </div>
-        ))}
-        {fieldRows.length === 0 ? (
-          <div className="rounded-2xl border border-border bg-card p-6 text-sm text-muted-foreground">—</div>
-        ) : null}
-      </div>
-
-      <div className="rounded-3xl border border-border bg-card p-5 shadow-sm">
-        <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
-          <h2 className="text-lg font-semibold">{ar.adminFields}</h2>
-          <Button type="button" variant="outline" onClick={() => setAdminOpen(true)}>
-            <ClipboardList className="size-4" />
-            {ar.editAdminFields}
-          </Button>
+          <div className="hidden flex-wrap items-center gap-2 lg:flex">
+            <Button onClick={() => setDialog("status")} disabled={!canChangeStatus}>
+              <RefreshCw className="size-4" />
+              {ar.changeStatus}
+            </Button>
+            <Button variant="secondary" onClick={() => setChatOpen(true)}>
+              <MessageCircle className="size-4" />
+              {ar.openConversation}
+            </Button>
+            {moreMenu}
+          </div>
         </div>
-        <p className="mb-3 text-xs text-muted-foreground">{ar.adminFieldsHint}</p>
-        <div className="grid gap-3 sm:grid-cols-2">
-          <div className="rounded-2xl bg-muted/40 px-3 py-2 text-sm">
-            <div className="text-xs text-muted-foreground">{ar.shamCashReceiptNumber}</div>
-            <div className="font-medium">{adminFields.shamCashReceiptNumber || "—"}</div>
-          </div>
-          <div className="rounded-2xl bg-muted/40 px-3 py-2 text-sm">
-            <div className="text-xs text-muted-foreground">{ar.invoiceNumber}</div>
-            <div className="font-medium">{adminFields.invoiceNumber || "—"}</div>
-          </div>
-          <div className="rounded-2xl bg-muted/40 px-3 py-2 text-sm">
-            <div className="text-xs text-muted-foreground">{ar.paymentDate}</div>
-            <div className="font-medium">{formatPaymentDate(adminFields.paymentDate) || "—"}</div>
-          </div>
-          <div className="rounded-2xl bg-muted/40 px-3 py-2 text-sm sm:col-span-2">
-            <div className="text-xs text-muted-foreground">{ar.adminNotes}</div>
-            <div className="whitespace-pre-wrap font-medium">{adminFields.adminNotes || "—"}</div>
-          </div>
-          <div className="rounded-2xl bg-muted/40 px-3 py-2 text-sm sm:col-span-2">
-            <div className="text-xs text-muted-foreground">{ar.invoiceFile}</div>
-            {adminFields.invoiceFileId ? (
-              <a
-                className="mt-1 inline-block font-medium text-primary underline"
-                href={`/api/files/${adminFields.invoiceFileId}`}
-                target="_blank"
-                rel="noreferrer"
-              >
-                {adminFields.invoiceFilename || ar.viewAttachedFile}
-              </a>
+        {statusContext ? <StatusContextNotes entry={statusContext} className="mt-4" /> : null}
+      </Card>
+
+      <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_20rem]">
+        <div className="min-w-0 space-y-5">
+          <Card>
+            <CardHeader title={ar.complaintContent} icon={<FileText />} />
+            {fieldRows.length === 0 ? (
+              <EmptyState title="—" className="py-8" />
             ) : (
-              <div className="font-medium">—</div>
+              <ol className="divide-y divide-border">
+                {fieldRows.map((row) => {
+                  const plain =
+                    row.answer.kind === "text" ||
+                    row.answer.kind === "empty" ||
+                    row.answer.kind === "location" ||
+                    row.answer.kind === "contact" ||
+                    row.answer.kind === "other";
+                  return (
+                    <li key={row.key} className="px-4 py-4 sm:px-5">
+                      <div className="text-sm font-semibold text-foreground">
+                        {row.label}
+                        {row.historical ? (
+                          <span className="ms-2 text-xs font-normal text-muted-foreground">({ar.historicalField})</span>
+                        ) : null}
+                      </div>
+                      {row.question && row.question !== row.label ? (
+                        <div className="mt-0.5 text-xs leading-relaxed text-muted-foreground">
+                          {ar.userQuestion}: {row.question}
+                        </div>
+                      ) : null}
+                      <div className="mt-2">
+                        {plain ? (
+                          <div
+                            className={cn(
+                              "whitespace-pre-wrap break-words leading-relaxed",
+                              row.answer.kind === "empty" ? "text-muted-foreground/70" : "text-[15px] text-foreground",
+                            )}
+                          >
+                            {row.answer.text}
+                          </div>
+                        ) : null}
+                        <FieldAnswerMedia orderId={id} fieldName={row.key} answer={row.answer} />
+                      </div>
+                    </li>
+                  );
+                })}
+              </ol>
             )}
-          </div>
+          </Card>
+
+          {extraFiles.length > 0 ? (
+            <Card>
+              <CardHeader title={ar.additionalFiles} icon={<Paperclip />} />
+              <ul className="flex flex-wrap gap-2 p-4 sm:px-5">
+                {extraFiles.map((fileId, i) => (
+                  <li key={fileId}>
+                    <a
+                      href={`/api/files/${fileId}`}
+                      target="_blank"
+                      rel="noreferrer"
+                      className={buttonClass("outline", "sm")}
+                    >
+                      <FileText className="size-3.5 text-primary" />
+                      {ar.fileN} {i + 1}
+                    </a>
+                  </li>
+                ))}
+              </ul>
+            </Card>
+          ) : null}
+
+          <Card>
+            <CardHeader title={ar.timeline} icon={<RefreshCw />} />
+            {history.length === 0 ? (
+              <EmptyState title={ar.noActivity} className="py-8" />
+            ) : (
+              <ol className="px-4 py-4 sm:px-5">
+                {history.map((h, i) => (
+                  <StatusHistoryItem key={String(h._id ?? i)} entry={h} last={i === history.length - 1} />
+                ))}
+              </ol>
+            )}
+          </Card>
         </div>
-      </div>
 
-      <div className="rounded-3xl border border-border bg-card p-4 shadow-sm">
-        <div className="mb-3 font-semibold">{ar.timeline}</div>
-        <ol className="space-y-2">
-          {history.map((h, i) => (
-            <li key={i} className="rounded-2xl bg-muted/40 px-3 py-2 text-sm">
-              <div className="font-medium">
-                {STATUS_LABEL[String(h.previousStatus)] ?? String(h.previousStatus ?? "—")}
-                {" → "}
-                {STATUS_LABEL[String(h.newStatus)] ?? String(h.newStatus)}
+        <aside className="space-y-5">
+          <Card>
+            <CardHeader title={ar.complainantInfo} icon={<UserRound />} />
+            <dl className="space-y-3 px-4 py-4 text-sm sm:px-5">
+              <div>
+                <dt className="text-xs text-muted-foreground">{ar.telegramName}</dt>
+                <dd className="mt-0.5 font-medium">{String(order.telegramName || "—")}</dd>
               </div>
-              {h.message ? <div className="mt-1 text-xs text-muted-foreground">{String(h.message)}</div> : null}
-              {h.attachmentFileId ? (
-                <a
-                  className="mt-1 inline-block text-xs text-primary underline"
-                  href={`/api/files/${String(h.attachmentFileId)}`}
-                  target="_blank"
-                  rel="noreferrer"
+              <div>
+                <dt className="text-xs text-muted-foreground">{ar.telegramUsername}</dt>
+                <dd className="mt-0.5 font-medium">
+                  {telegramHref ? (
+                    <a className="text-primary hover:underline" href={telegramHref} target="_blank" rel="noreferrer" dir="ltr">
+                      @{String(order.telegramUsername).replace(/^@/, "")}
+                    </a>
+                  ) : (
+                    "—"
+                  )}
+                </dd>
+              </div>
+              <div>
+                <dt className="text-xs text-muted-foreground">{ar.telegramId}</dt>
+                <dd className="mt-0.5 font-medium tabular-nums">
+                  <span dir="ltr">{String(order.telegramUserId)}</span>
+                </dd>
+              </div>
+            </dl>
+            <div className="border-t border-border p-3">
+              <Button variant="secondary" className="w-full" onClick={() => setChatOpen(true)}>
+                <MessageCircle className="size-4" />
+                {ar.openConversation}
+              </Button>
+            </div>
+          </Card>
+
+          <Card className="bg-sidebar">
+            <CardHeader
+              title={ar.adminFields}
+              description={ar.adminSectionHint}
+              icon={<ClipboardList />}
+              actions={
+                <Button variant="ghost" size="icon-sm" onClick={() => setAdminOpen(true)} aria-label={ar.editAdminFields} title={ar.editAdminFields}>
+                  <Pencil className="size-4" />
+                </Button>
+              }
+            />
+            <dl className="space-y-3 px-4 py-4 text-sm sm:px-5">
+              <div>
+                <dt className="text-xs text-muted-foreground">{ar.adminNotes}</dt>
+                <dd
+                  className={cn(
+                    "mt-0.5 whitespace-pre-wrap break-words leading-relaxed",
+                    adminFields.adminNotes ? "text-foreground" : "text-muted-foreground/70",
+                  )}
                 >
-                  {ar.viewAttachedFile}
-                </a>
-              ) : null}
-              <div className="mt-1 text-xs text-muted-foreground">{formatTime(String(h.createdAt))}</div>
-            </li>
-          ))}
-          {history.length === 0 ? <li className="text-sm text-muted-foreground">—</li> : null}
-        </ol>
+                  {adminFields.adminNotes || ar.noAdminNotes}
+                </dd>
+              </div>
+              <div>
+                <dt className="text-xs text-muted-foreground">{ar.adminAttachment}</dt>
+                <dd className="mt-0.5">
+                  {adminFields.attachmentFileId ? (
+                    <a
+                      className="inline-flex max-w-full items-center gap-1.5 font-medium text-primary hover:underline"
+                      href={`/api/files/${adminFields.attachmentFileId}`}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      <Paperclip className="size-3.5 shrink-0" />
+                      <span className="truncate" dir="auto">
+                        {adminFields.attachmentFilename || ar.viewAttachedFile}
+                      </span>
+                    </a>
+                  ) : (
+                    <span className="text-muted-foreground/70">—</span>
+                  )}
+                </dd>
+              </div>
+            </dl>
+          </Card>
+        </aside>
       </div>
 
-      <div className="sticky bottom-3 z-10 rounded-3xl border border-border bg-card/95 p-3 shadow-lg backdrop-blur">
-        <div className="flex flex-wrap gap-2">
-          <Button type="button" onClick={() => setDialog("status")} disabled={nextStatuses.length === 0}>
+      <div className="fixed inset-x-0 bottom-0 z-10 border-t border-border bg-card/95 px-3 py-2.5 pb-[max(0.625rem,env(safe-area-inset-bottom))] backdrop-blur lg:hidden">
+        <div className="mx-auto flex max-w-3xl items-center gap-2">
+          <Button className="flex-1" onClick={() => setDialog("status")} disabled={!canChangeStatus}>
             <RefreshCw className="size-4" />
             {ar.changeStatus}
           </Button>
-          <Button type="button" variant="secondary" onClick={() => setChatOpen(true)}>
+          <Button variant="secondary" className="flex-1" onClick={() => setChatOpen(true)}>
             <MessageCircle className="size-4" />
-            {ar.openConversation}
+            {ar.conversation}
           </Button>
-          <Button type="button" variant="secondary" onClick={() => setDialog("message")}>
-            <MessageSquare className="size-4" />
-            {ar.sendMessage}
-          </Button>
-          <Button type="button" variant="outline" onClick={() => setDialog("attach")}>
-            <Paperclip className="size-4" />
-            {ar.attachFile}
-          </Button>
-          <Button type="button" variant="outline" onClick={() => setAdminOpen(true)}>
-            <ClipboardList className="size-4" />
-            {ar.editAdminFields}
-          </Button>
-          <Button type="button" variant="danger" onClick={() => setDialog("block")}>
-            <Ban className="size-4" />
-            {ar.block}
-          </Button>
+          {moreMenu}
         </div>
       </div>
 
-      <OrderChatDialog
-        orderId={typeof id === "string" ? id : Array.isArray(id) ? id[0] : null}
-        open={chatOpen}
-        onOpenChange={setChatOpen}
-      />
+      <OrderChatDialog orderId={orderId} open={chatOpen} onOpenChange={setChatOpen} />
       <AdminFieldsDialog
         open={adminOpen}
         onOpenChange={setAdminOpen}
-        orderId={typeof id === "string" ? id : Array.isArray(id) ? id[0] : null}
+        orderId={orderId}
         orderNumber={String(order.orderNumber)}
         value={adminFields}
         onSaved={(next: OrderAdminFields) => {
@@ -400,64 +477,14 @@ export default function OrderDetailsPage() {
         }}
       />
 
-      <Dialog
+      <StatusChangeDialog
         open={dialog === "status"}
         onOpenChange={(open) => (!open ? closeDialog() : setDialog("status"))}
-        title={ar.changeStatus}
-        description={ar.statusChangeMessage}
-        size="md"
-        footer={
-          <>
-            <Button type="button" variant="outline" onClick={closeDialog}>
-              {ar.cancel}
-            </Button>
-          </>
-        }
-      >
-        <div className="space-y-4">
-          <div>
-            <Label>{ar.statusChangeMessage}</Label>
-            <textarea
-              className="mt-1 w-full rounded-xl border border-border bg-card px-3 py-2 text-sm outline-none ring-primary/30 focus:ring-2"
-              placeholder={ar.statusChangeMessage}
-              value={message}
-              onChange={(e) => setMessage(e.target.value)}
-              rows={4}
-            />
-          </div>
-          <div className="flex flex-wrap items-center gap-2 text-sm">
-            <label className="cursor-pointer rounded-xl bg-primary px-3 py-2 text-xs font-medium text-primary-foreground">
-              {ar.attachFile}
-              <input
-                type="file"
-                accept=".png,.jpg,.jpeg,.webp,.pdf,.txt,.csv,.zip,.doc,.docx,.xls,.xlsx,.ppt,.pptx,image/*,application/pdf"
-                className="hidden"
-                onChange={(e) => setStatusFile(e.target.files?.[0] ?? null)}
-              />
-            </label>
-            {statusFile ? (
-              <span className="text-xs text-muted-foreground">
-                {statusFile.name}
-                <button type="button" className="ms-2 text-danger" onClick={() => setStatusFile(null)}>
-                  {ar.delete}
-                </button>
-              </span>
-            ) : (
-              <span className="text-xs text-muted-foreground">{ar.statusChangeFileHint}</span>
-            )}
-          </div>
-          <div className="flex flex-wrap gap-2">
-            {nextStatuses.map((s) => (
-              <Button key={s} variant="outline" loading={busy === `status:${s}`} onClick={() => change(s)}>
-                {STATUS_LABEL[s]}
-              </Button>
-            ))}
-            {nextStatuses.length === 0 ? (
-              <div className="text-xs text-muted-foreground">{ar.noTransitions}</div>
-            ) : null}
-          </div>
-        </div>
-      </Dialog>
+        orderId={orderId}
+        orderNumber={String(order.orderNumber)}
+        currentStatus={order.status}
+        onChanged={load}
+      />
 
       <Dialog
         open={dialog === "message"}
@@ -466,52 +493,31 @@ export default function OrderDetailsPage() {
         size="md"
         footer={
           <>
-            <Button type="button" variant="outline" onClick={closeDialog}>
-              {ar.cancel}
-            </Button>
             <Button
               type="button"
               loading={busy === "message"}
               disabled={!message.trim() && !attachFile}
               onClick={sendMessage}
             >
-              {ar.sendMessage}
+              {ar.send}
+            </Button>
+            <Button type="button" variant="outline" onClick={closeDialog}>
+              {ar.cancel}
             </Button>
           </>
         }
       >
-        <div className="space-y-3">
+        <div className="space-y-4">
           <div>
-            <Label>{ar.sendMessage}</Label>
-            <textarea
-              className="mt-1 w-full rounded-xl border border-border bg-card px-3 py-2 text-sm outline-none ring-primary/30 focus:ring-2"
+            <Label htmlFor="direct-message">{ar.typeMessage}</Label>
+            <Textarea
+              id="direct-message"
               value={message}
               onChange={(e) => setMessage(e.target.value)}
               rows={5}
-              placeholder={ar.statusChangeMessage}
             />
           </div>
-          <div className="flex flex-wrap items-center gap-2 text-sm">
-            <label className="cursor-pointer rounded-xl bg-primary px-3 py-2 text-xs font-medium text-primary-foreground">
-              {ar.attachFile}
-              <input
-                type="file"
-                accept=".png,.jpg,.jpeg,.webp,.pdf,.txt,.csv,.zip,.doc,.docx,.xls,.xlsx,.ppt,.pptx,image/*,application/pdf"
-                className="hidden"
-                onChange={(e) => setAttachFile(e.target.files?.[0] ?? null)}
-              />
-            </label>
-            {attachFile ? (
-              <span className="text-xs text-muted-foreground">
-                {attachFile.name}
-                <button type="button" className="ms-2 text-danger" onClick={() => setAttachFile(null)}>
-                  {ar.delete}
-                </button>
-              </span>
-            ) : (
-              <span className="text-xs text-muted-foreground">{ar.statusChangeFileHint}</span>
-            )}
-          </div>
+          <FilePicker file={attachFile} onChange={setAttachFile} />
         </div>
       </Dialog>
 
@@ -522,47 +528,87 @@ export default function OrderDetailsPage() {
         size="sm"
         footer={
           <>
-            <Button type="button" variant="outline" onClick={closeDialog}>
-              {ar.cancel}
-            </Button>
             <Button type="button" loading={busy === "upload"} disabled={!attachFile} onClick={uploadAttachment}>
               {ar.attachFile}
+            </Button>
+            <Button type="button" variant="outline" onClick={closeDialog}>
+              {ar.cancel}
             </Button>
           </>
         }
       >
-        <div className="space-y-3">
-          <Label>{ar.attachFile}</Label>
-          <input
-            type="file"
-            className="block w-full text-sm"
-            onChange={(e) => setAttachFile(e.target.files?.[0] ?? null)}
-          />
-          {attachFile ? <div className="text-xs text-muted-foreground">{attachFile.name}</div> : null}
-        </div>
+        <FilePicker file={attachFile} onChange={setAttachFile} hint={false} accept="" />
       </Dialog>
 
       <Dialog
         open={dialog === "block"}
         onOpenChange={(open) => (!open ? closeDialog() : setDialog("block"))}
         title={ar.block}
+        description={ar.blockReasonHint}
         size="sm"
         footer={
           <>
-            <Button type="button" variant="outline" onClick={closeDialog}>
-              {ar.cancel}
-            </Button>
             <Button type="button" variant="danger" loading={busy === "block"} onClick={block}>
               {ar.block}
+            </Button>
+            <Button type="button" variant="outline" onClick={closeDialog}>
+              {ar.cancel}
             </Button>
           </>
         }
       >
         <div>
-          <Label>{ar.reason}</Label>
-          <Input className="mt-1" placeholder={ar.reason} value={reason} onChange={(e) => setReason(e.target.value)} />
+          <Label htmlFor="block-reason">
+            {ar.reason} <span className="font-normal text-muted-foreground">({ar.optional})</span>
+          </Label>
+          <Input id="block-reason" value={reason} onChange={(e) => setReason(e.target.value)} />
         </div>
       </Dialog>
+    </div>
+  );
+}
+
+function FilePicker({
+  file,
+  onChange,
+  hint = true,
+  accept = FILE_ACCEPT,
+}: {
+  file: File | null;
+  onChange: (file: File | null) => void;
+  hint?: boolean;
+  accept?: string;
+}) {
+  return (
+    <div>
+      {file ? (
+        <div className="flex items-center gap-2 rounded-xl border border-border bg-muted/30 p-2">
+          <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-card text-primary ring-1 ring-border">
+            <FileText className="size-4" />
+          </span>
+          <span className="min-w-0 flex-1 truncate text-sm" dir="auto">
+            {file.name}
+          </span>
+          <Button type="button" variant="danger-ghost" size="sm" onClick={() => onChange(null)}>
+            {ar.delete}
+          </Button>
+        </div>
+      ) : (
+        <label className={buttonClass("outline", "md", "cursor-pointer border-dashed")}>
+          <Upload className="size-4" />
+          {ar.attachFile}
+          <input
+            type="file"
+            accept={accept || undefined}
+            className="sr-only"
+            onChange={(e) => {
+              onChange(e.target.files?.[0] ?? null);
+              e.target.value = "";
+            }}
+          />
+        </label>
+      )}
+      {hint && !file ? <FieldHint>{ar.statusChangeFileHint}</FieldHint> : null}
     </div>
   );
 }

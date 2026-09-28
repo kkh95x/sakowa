@@ -8,6 +8,7 @@ import { Label } from "@/components/ui/label";
 import { useToast } from "@/components/ui/toast";
 import type { FieldType, RequestField } from "@/types";
 import { nextFieldName } from "@/lib/requests/field-names";
+import { OptionsEditor } from "@/components/requests/options-editor";
 
 const FIELD_TYPES: FieldType[] = [
   "TEXT",
@@ -26,6 +27,7 @@ const FIELD_TYPES: FieldType[] = [
   "IMAGE",
   "INSTRUCTION",
   "CONFIRMATION",
+  "DYNAMIC",
 ];
 
 export type RequestTypeEditorValue = {
@@ -230,27 +232,14 @@ export function RequestTypeEditor({
                 placeholder="رسالة Telegram"
               />
               {(f.type === "SELECT" || f.type === "RADIO" || f.type === "CHECKBOX") && (
-                <Input
-                  className="md:col-span-2"
-                  value={(f.options ?? []).map((o) => o.label).join(", ")}
-                  onChange={(e) =>
-                    setFields((all) =>
-                      all.map((x, i) =>
-                        i === idx
-                          ? {
-                              ...x,
-                              options: e.target.value
-                                .split(",")
-                                .map((s) => s.trim())
-                                .filter(Boolean)
-                                .map((label) => ({ label, value: label })),
-                            }
-                          : x,
-                      ),
-                    )
-                  }
-                  placeholder={ar.optionsHint}
-                />
+                <div className="md:col-span-2">
+                  <OptionsEditor
+                    field={f}
+                    onChange={(options) =>
+                      setFields((all) => all.map((x, i) => (i === idx ? { ...x, options } : x)))
+                    }
+                  />
+                </div>
               )}
               <label className="flex items-center gap-2 text-sm">
                 <input

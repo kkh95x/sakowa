@@ -1,15 +1,18 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { FileIcon, Pencil, Trash2 } from "lucide-react";
+import { FileIcon, Pencil, Trash2, Upload } from "lucide-react";
 import { Dialog } from "@/components/ui/dialog";
-import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
+import { Button, buttonClass } from "@/components/ui/button";
+import { Textarea } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { ar } from "@/i18n/ar";
 import { useToast } from "@/components/ui/toast";
 import { emptyAdminFields, parseAdminFields } from "@/lib/orders/admin-fields";
 import type { OrderAdminFields } from "@/types";
+
+const ATTACHMENT_ACCEPT =
+  ".png,.jpg,.jpeg,.webp,.pdf,.txt,.csv,.zip,.doc,.docx,.xls,.xlsx,.ppt,.pptx,image/*,application/pdf";
 
 export function AdminFieldsDialog({
   open,
@@ -27,27 +30,21 @@ export function AdminFieldsDialog({
   onSaved?: (next: OrderAdminFields) => void;
 }) {
   const toast = useToast();
-  const [shamCashReceiptNumber, setShamCashReceiptNumber] = useState("");
   const [adminNotes, setAdminNotes] = useState("");
-  const [invoiceNumber, setInvoiceNumber] = useState("");
-  const [paymentDate, setPaymentDate] = useState("");
-  const [invoiceFileId, setInvoiceFileId] = useState<string | null>(null);
-  const [invoiceFilename, setInvoiceFilename] = useState<string | null>(null);
-  const [invoiceFile, setInvoiceFile] = useState<File | null>(null);
-  const [clearInvoice, setClearInvoice] = useState(false);
+  const [attachmentFileId, setAttachmentFileId] = useState<string | null>(null);
+  const [attachmentFilename, setAttachmentFilename] = useState<string | null>(null);
+  const [attachmentFile, setAttachmentFile] = useState<File | null>(null);
+  const [clearAttachment, setClearAttachment] = useState(false);
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
     if (!open) return;
     const parsed = parseAdminFields(value);
-    setShamCashReceiptNumber(parsed.shamCashReceiptNumber);
     setAdminNotes(parsed.adminNotes);
-    setInvoiceNumber(parsed.invoiceNumber);
-    setPaymentDate(parsed.paymentDate);
-    setInvoiceFileId(parsed.invoiceFileId);
-    setInvoiceFilename(parsed.invoiceFilename);
-    setInvoiceFile(null);
-    setClearInvoice(false);
+    setAttachmentFileId(parsed.attachmentFileId);
+    setAttachmentFilename(parsed.attachmentFilename);
+    setAttachmentFile(null);
+    setClearAttachment(false);
   }, [open, value]);
 
   async function save() {
@@ -55,12 +52,9 @@ export function AdminFieldsDialog({
     setBusy(true);
     try {
       const form = new FormData();
-      form.set("shamCashReceiptNumber", shamCashReceiptNumber);
       form.set("adminNotes", adminNotes);
-      form.set("invoiceNumber", invoiceNumber);
-      form.set("paymentDate", paymentDate);
-      if (invoiceFile) form.set("invoiceFile", invoiceFile);
-      if (clearInvoice && !invoiceFile) form.set("clearInvoice", "true");
+      if (attachmentFile) form.set("attachmentFile", attachmentFile);
+      if (clearAttachment && !attachmentFile) form.set("clearAttachment", "true");
       const res = await fetch(`/api/orders/${orderId}/admin-fields`, {
         method: "PATCH",
         body: form,
@@ -79,7 +73,16 @@ export function AdminFieldsDialog({
     }
   }
 
-  const existingInvoice = invoiceFileId && !clearInvoice ? invoiceFilename || ar.invoiceFile : null;
+  const existing = attachmentFileId && !clearAttachment ? attachmentFileId : null;
+  const hasFile = Boolean(attachmentFile || existing);
+
+  function pickFile(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0] ?? null;
+    e.target.value = "";
+    if (!file) return;
+    setAttachmentFile(file);
+    setClearAttachment(false);
+  }
 
   return (
     <Dialog
@@ -90,30 +93,20 @@ export function AdminFieldsDialog({
       size="md"
       footer={
         <>
-          <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
-            {ar.cancel}
-          </Button>
           <Button type="button" onClick={() => void save()} loading={busy} disabled={!orderId}>
             {ar.save}
+          </Button>
+          <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
+            {ar.cancel}
           </Button>
         </>
       }
     >
       <div className="space-y-4">
         <div>
-          <Label htmlFor="sham-cash">{ar.shamCashReceiptNumber}</Label>
-          <Input
-            id="sham-cash"
-            value={shamCashReceiptNumber}
-            onChange={(e) => setShamCashReceiptNumber(e.target.value)}
-            maxLength={120}
-          />
-        </div>
-        <div>
           <Label htmlFor="admin-notes">{ar.adminNotes}</Label>
-          <textarea
+          <Textarea
             id="admin-notes"
-            className="mt-1 w-full rounded-xl border border-border bg-card px-3 py-2 text-sm outline-none ring-primary/30 focus:ring-2"
             value={adminNotes}
             onChange={(e) => setAdminNotes(e.target.value)}
             rows={4}
@@ -121,68 +114,53 @@ export function AdminFieldsDialog({
           />
         </div>
         <div>
-          <Label htmlFor="invoice-number">{ar.invoiceNumber}</Label>
-          <Input
-            id="invoice-number"
-            value={invoiceNumber}
-            onChange={(e) => setInvoiceNumber(e.target.value)}
-            maxLength={120}
-          />
-        </div>
-        <div>
-          <Label htmlFor="payment-date">{ar.paymentDate}</Label>
-          <Input
-            id="payment-date"
-            type="date"
-            value={paymentDate}
-            onChange={(e) => setPaymentDate(e.target.value)}
-          />
-        </div>
-        <div>
-          <Label>{ar.invoiceFile}</Label>
-          <div className="mt-1 flex flex-wrap items-center gap-2">
-            <label className="cursor-pointer rounded-xl bg-primary px-3 py-2 text-xs font-medium text-primary-foreground">
-              {ar.chooseInvoiceFile}
-              <input
-                type="file"
-                accept=".png,.jpg,.jpeg,.webp,.pdf,.txt,.csv,.zip,.doc,.docx,.xls,.xlsx,.ppt,.pptx,image/*,application/pdf"
-                className="hidden"
-                onChange={(e) => {
-                  const file = e.target.files?.[0] ?? null;
-                  setInvoiceFile(file);
-                  if (file) setClearInvoice(false);
-                }}
-              />
+          <Label>{ar.adminAttachment}</Label>
+          {hasFile ? (
+            <div className="flex flex-wrap items-center gap-2 rounded-xl border border-border bg-muted/30 p-2">
+              <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-card text-primary ring-1 ring-border">
+                <FileIcon className="size-4" />
+              </span>
+              {attachmentFile ? (
+                <span className="min-w-0 flex-1 truncate text-sm" dir="auto">
+                  {attachmentFile.name}
+                </span>
+              ) : (
+                <a
+                  className="min-w-0 flex-1 truncate text-sm text-primary underline-offset-2 hover:underline"
+                  href={`/api/files/${existing}`}
+                  target="_blank"
+                  rel="noreferrer"
+                  dir="auto"
+                >
+                  {attachmentFilename || ar.adminAttachment}
+                </a>
+              )}
+              <div className="flex items-center gap-1">
+                <label className={buttonClass("outline", "sm", "cursor-pointer")}>
+                  {ar.replaceAdminAttachment}
+                  <input type="file" accept={ATTACHMENT_ACCEPT} className="sr-only" onChange={pickFile} />
+                </label>
+                <Button
+                  type="button"
+                  variant="danger-ghost"
+                  size="sm"
+                  onClick={() => {
+                    if (attachmentFile) setAttachmentFile(null);
+                    else setClearAttachment(true);
+                  }}
+                >
+                  <Trash2 className="size-3.5" />
+                  {ar.removeAdminAttachment}
+                </Button>
+              </div>
+            </div>
+          ) : (
+            <label className={buttonClass("outline", "md", "cursor-pointer border-dashed")}>
+              <Upload className="size-4" />
+              {ar.chooseAdminAttachment}
+              <input type="file" accept={ATTACHMENT_ACCEPT} className="sr-only" onChange={pickFile} />
             </label>
-            {invoiceFile ? <span className="text-sm">{invoiceFile.name}</span> : null}
-            {!invoiceFile && existingInvoice && invoiceFileId ? (
-              <a
-                className="inline-flex items-center gap-1 text-sm text-primary underline"
-                href={`/api/files/${invoiceFileId}`}
-                target="_blank"
-                rel="noreferrer"
-              >
-                <FileIcon className="size-3.5" />
-                {existingInvoice}
-              </a>
-            ) : null}
-            {(invoiceFile || existingInvoice) && (
-              <button
-                type="button"
-                className="inline-flex items-center gap-1 rounded-xl px-2 py-1.5 text-xs text-muted-foreground hover:bg-muted"
-                onClick={() => {
-                  if (invoiceFile) {
-                    setInvoiceFile(null);
-                    return;
-                  }
-                  setClearInvoice(true);
-                }}
-              >
-                <Trash2 className="size-3.5" />
-                {ar.removeInvoiceFile}
-              </button>
-            )}
-          </div>
+          )}
         </div>
       </div>
     </Dialog>
@@ -192,22 +170,23 @@ export function AdminFieldsDialog({
 export function AdminFieldsButton({
   onClick,
   className,
+  compact = false,
 }: {
   onClick: () => void;
   className?: string;
+  compact?: boolean;
 }) {
   return (
-    <button
+    <Button
       type="button"
-      className={
-        className ??
-        "inline-flex items-center gap-1 rounded-xl border border-border px-2.5 py-1.5 text-sm hover:bg-muted"
-      }
+      variant={compact ? "ghost" : "outline"}
+      size="sm"
+      className={className}
       onClick={onClick}
       title={ar.editAdminFields}
     >
       <Pencil className="size-3.5" />
-      {ar.editAdminFields}
-    </button>
+      {compact ? ar.adminFields : ar.editAdminFields}
+    </Button>
   );
 }

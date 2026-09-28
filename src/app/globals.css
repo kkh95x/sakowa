@@ -3,23 +3,45 @@
 
 @theme {
   --font-sans: "IBM Plex Sans Arabic", ui-sans-serif, system-ui, sans-serif;
-  --color-primary: #1b6b4a;
-  --color-primary-foreground: #f7f3ea;
+
+  --color-background: #f6f4ef;
+  --color-foreground: #1f2623;
+  --color-card: #ffffff;
+  --color-muted: #f0ede6;
+  --color-muted-foreground: #5d6661;
+  --color-border: #e3dfd5;
+  --color-border-strong: #cfc9bb;
+
+  --color-primary: #1f6b4f;
+  --color-primary-hover: #185a42;
+  --color-primary-soft: #e8f1ec;
+  --color-primary-foreground: #ffffff;
+
+  --color-accent: #b8912c;
+  --color-accent-soft: #f7f0dc;
+  --color-accent-foreground: #5c4610;
+
   --color-secondary: #2f3d34;
-  --color-accent: #c9a227;
-  --color-accent-foreground: #1c1917;
-  --color-background: #f7f3ea;
-  --color-foreground: #1c1917;
-  --color-muted: #ebe4d6;
-  --color-muted-foreground: #5c564c;
-  --color-border: #d9d0bf;
-  --color-success: #1b7f4e;
-  --color-warning: #c9891a;
+
+  --color-success: #2f7d55;
+  --color-success-soft: #e6f3ec;
+  --color-warning: #9a5b07;
+  --color-warning-soft: #fcf1de;
   --color-danger: #b42318;
-  --color-info: #1d6b8a;
-  --color-card: #fffdf8;
-  --color-sidebar: #143d2d;
-  --color-sidebar-foreground: #f7f3ea;
+  --color-danger-soft: #fdecea;
+  --color-info: #1f6a8a;
+  --color-info-soft: #e6f1f6;
+
+  --color-sidebar: #fbfaf7;
+  --color-sidebar-foreground: #1f2623;
+
+  --radius-lg: 0.5rem;
+  --radius-xl: 0.625rem;
+  --radius-2xl: 0.875rem;
+  --radius-3xl: 1.125rem;
+
+  --shadow-card: 0 1px 2px rgb(31 38 35 / 0.04), 0 1px 3px rgb(31 38 35 / 0.05);
+  --shadow-pop: 0 10px 30px -8px rgb(31 38 35 / 0.18), 0 2px 6px rgb(31 38 35 / 0.06);
 }
 
 html,
@@ -31,6 +53,42 @@ body {
   background: var(--color-background);
   color: var(--color-foreground);
   font-family: var(--font-sans);
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+h1,
+h2,
+h3 {
+  line-height: 1.35;
+}
+
+:where(a, button, [role="button"], summary, input[type="checkbox"], input[type="radio"]):focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+}
+
+::selection {
+  background: color-mix(in srgb, var(--color-primary) 18%, transparent);
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-border-strong) transparent;
+}
+
+@keyframes dialog-fade {
+  from {
+    opacity: 0;
+  }
+}
+
+@keyframes dialog-in {
+  from {
+    opacity: 0;
+    transform: scale(0.97);
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {

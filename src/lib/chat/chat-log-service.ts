@@ -2,6 +2,7 @@ import { AsyncLocalStorage } from "node:async_hooks";
 import { ObjectId } from "mongodb";
 import { collections, getDb } from "@/lib/db/client";
 import { parseFieldAnswer, displayChoice } from "@/lib/orders/field-answer";
+import { orderFieldDefinitions } from "@/lib/orders/order-field-rows";
 import type { RequestField } from "@/types";
 
 export type ChatActor = "user" | "bot" | "admin";
@@ -296,7 +297,7 @@ export class ChatLogService {
         direction: "out",
         actor: "bot",
         kind: "text",
-        text: "اختر الخدمة:",
+        text: "اختر نوع الشكوى:",
         createdAt: new Date(t),
       });
       t += 20_000;
@@ -475,7 +476,7 @@ export class ChatLogService {
       reconstructed.push(
         ...this.reconstructFromOrder({
           order: row,
-          fields: orderFields,
+          fields: orderFieldDefinitions(row as Record<string, unknown>, orderFields),
           history: historyByOrder.get(id) ?? [],
           requestName: requestName || undefined,
         }),

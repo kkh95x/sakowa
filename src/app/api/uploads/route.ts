@@ -1,6 +1,11 @@
 import { errorToResponse, json, withAuth } from "@/lib/api/http";
 import { GridFSStorageService } from "@/lib/storage/gridfs";
 import { isAllowedUpload, resolveUploadMime } from "@/lib/storage/mime";
+import {
+  PROMPT_DOCUMENT_MAX_BYTES,
+  PROMPT_IMAGE_MAX_BYTES,
+  PROMPT_IMAGE_MIMES,
+} from "@/lib/telegram/field-prompt";
 
 export async function POST(req: Request) {
   try {
@@ -14,12 +19,22 @@ export async function POST(req: Request) {
     if (!isAllowedUpload(mime, filename)) throw new Error("INVALID_MIME");
     const isImage = mime.startsWith("image/");
     const purposeRaw = String(form.get("purpose") ?? "");
+    if (purposeRaw === "BOT_MEDIA") {
+      const blockType = String(form.get("blockType") ?? "");
+      if (blockType !== "image" && blockType !== "document") throw new Error("INVALID_BLOCK_TYPE");
+      if (blockType === "image" && !PROMPT_IMAGE_MIMES.includes(mime)) throw new Error("INVALID_MIME");
+      if (buf.length > (blockType === "image" ? PROMPT_IMAGE_MAX_BYTES : PROMPT_DOCUMENT_MAX_BYTES)) {
+        throw new Error("FILE_TOO_LARGE");
+      }
+    }
     const purpose =
       purposeRaw === "ADMIN_ATTACHMENT"
         ? "ADMIN_ATTACHMENT"
-        : isImage
-          ? "REQUEST_IMAGE"
-          : "ORDER_ATTACHMENT";
+        : purposeRaw === "BOT_MEDIA"
+          ? "BOT_MEDIA"
+          : isImage
+            ? "REQUEST_IMAGE"
+            : "ORDER_ATTACHMENT";
     const fileId = await GridFSStorageService.save({
       buffer: buf,
       filename,
@@ -29,7 +44,7 @@ export async function POST(req: Request) {
       uploadedBy: user.id,
       purpose,
     });
-    return json({ fileId, mimeType: mime, filename });
+    return json({ fileId, mimeType: mime, filename, size: buf.length });
   } catch (err) {
     return errorToResponse(err);
   }

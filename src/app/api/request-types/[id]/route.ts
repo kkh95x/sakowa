@@ -13,6 +13,7 @@ function serializeRequestType(item: Record<string, unknown>) {
     botId: item.botId,
     active: Boolean(item.active),
     fields: item.fields ?? [],
+    branchingRules: item.branchingRules ?? [],
     telegramGroupId: item.telegramGroupId ?? null,
     description: item.description ?? "",
   };
