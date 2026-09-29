@@ -112,6 +112,8 @@ function walk(buffer: Buffer, onElement: (id: number, data: Buffer) => void) {
 }
 
 /** EBML vint. Element ids keep the length marker; sizes strip it. `null` size means unknown. */
+function readVint(buffer: Buffer, offset: number, stripMarker: false): { value: number; length: number };
+function readVint(buffer: Buffer, offset: number, stripMarker: true): { value: number | null; length: number };
 function readVint(buffer: Buffer, offset: number, stripMarker: boolean): { value: number | null; length: number } {
   const first = buffer[offset];
   if (first == null) throw new Error("WEBM_TRUNCATED");
