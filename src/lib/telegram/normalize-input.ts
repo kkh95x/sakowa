@@ -64,6 +64,11 @@ export type NormalizedUserInput = {
   metadata: Record<string, unknown>;
 };
 
+export type VoiceTranscript = {
+  status: "pending" | "ready" | "failed";
+  text: string | null;
+};
+
 export type DynamicFieldAnswer = {
   inputType: "dynamic";
   contentType: TelegramContentType;
@@ -73,6 +78,8 @@ export type DynamicFieldAnswer = {
   filename: string | null;
   mimeType: string | null;
   metadata: Record<string, unknown>;
+  /** Arabic transcript of a voice answer. Filled in the background after the reply is sent. */
+  transcript?: VoiceTranscript;
 };
 
 const CONTENT_LABELS: Record<TelegramContentType, string> = {

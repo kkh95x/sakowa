@@ -28,12 +28,12 @@ export const STATUS_AR: Record<string, string> = {
 };
 
 export const TRANSITIONS: Record<ComplaintStatus, ComplaintStatus[]> = {
-  PENDING: ["REVIEWING", "REJECTED"],
-  REVIEWING: ["IN_PROGRESS", "REJECTED"],
-  IN_PROGRESS: ["RESOLVED"],
+  PENDING: ["REVIEWING", "REJECTED", "RESOLVED", "CLOSED"],
+  REVIEWING: ["IN_PROGRESS", "REJECTED", "RESOLVED", "CLOSED"],
+  IN_PROGRESS: ["RESOLVED", "CLOSED"],
   RESOLVED: ["CLOSED"],
-  REJECTED: [],
-  CLOSED: [],
+  REJECTED: ["RESOLVED", "CLOSED"],
+  CLOSED: ["RESOLVED"],
 };
 
 export const REJECTION_REASON_MIN = 3;

@@ -2,6 +2,7 @@ import { ObjectId } from "mongodb";
 import { collections, getDb } from "@/lib/db/client";
 import { hashPassword, validatePasswordPolicy, storePasswordHistory } from "@/lib/auth/password";
 import { revokeAllUserSessions } from "@/lib/auth/session";
+import { TwoFactorService } from "@/lib/auth/two-factor";
 import { audit } from "@/lib/audit/audit";
 import type { Role, UserStatus } from "@/types";
 
@@ -93,5 +94,15 @@ export class UserService {
     await storePasswordHistory(id, hash);
     await revokeAllUserSessions(id);
     await audit({ actorUserId: actorId, category: "USERS", action: "ADMIN_PASSWORD_RESET", entityId: id });
+  }
+
+  static async clearTwoFactor(id: string, actorId: string) {
+    const db = await getDb();
+    const user = await db.collection(collections.users).findOne({ _id: new ObjectId(id) });
+    if (!user) throw new Error("NOT_FOUND");
+    if (user.role !== "ADMIN") throw new Error("FORBIDDEN");
+    if (!user.twoFactorEnabled) throw new Error("التحقق بخطوتين غير مفعّل");
+    await TwoFactorService.disable(id, actorId);
+    await revokeAllUserSessions(id);
   }
 }

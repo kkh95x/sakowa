@@ -2,7 +2,7 @@
 
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type MouseEvent } from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import { Check, CheckCheck, ChevronDown, ChevronUp, ClipboardList, Copy, Paperclip, Pencil, RefreshCw, Send, Trash2, X } from "lucide-react";
+import { Check, CheckCheck, ChevronDown, ChevronUp, ClipboardList, Copy, Mic, Paperclip, Pause, Pencil, Play, RefreshCw, Send, Trash2, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Dialog } from "@/components/ui/dialog";
 import { CompactFileOpenButton } from "@/components/orders/field-answer-media";
@@ -147,6 +147,130 @@ function dayLabel(value: string) {
   }).format(d);
 }
 
+function isVoiceCaption(text: string) {
+  const value = text.trim();
+  return value === "🎤 رسالة صوتية" || value === "🎵 مقطع صوتي" || value === "مرفق" || /^voice\.(ogg|oga|webm|m4a|mp3|wav)$/i.test(value);
+}
+
+function isAudioMsg(msg: ChatMsg) {
+  const mime = (msg.mimeType || "").split(";")[0].toLowerCase();
+  if (mime.startsWith("audio/")) return true;
+  if (mime.startsWith("video/")) return false;
+  const name = (msg.filename || "").toLowerCase();
+  if (/\.(ogg|oga|opus|mp3|m4a|wav|aac)$/.test(name)) return true;
+  return /^voice\.(webm|ogg|oga|m4a|mp3|wav)$/.test(name);
+}
+
+function recordClock(seconds: number) {
+  const m = Math.floor(seconds / 60);
+  const s = seconds % 60;
+  return `${m}:${String(s).padStart(2, "0")}`;
+}
+
+function telegramChatHref(peer: ChatPeer) {
+  const username = peer.username?.replace(/^@/, "").trim();
+  if (username) return `https://t.me/${encodeURIComponent(username)}`;
+  return `tg://user?id=${peer.telegramUserId}`;
+}
+
+function TelegramMark({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 24 24" className={className} aria-hidden="true" fill="currentColor">
+      <path d="M21.8 4.3 2.9 11.5c-1.3.5-1.2 1.2-.2 1.5l4.8 1.5 1.9 5.8c.2.7.1.9.8.9.4 0 .6-.2.9-.4l2.7-2.6 4.9 3.6c.9.5 1.5.2 1.7-.8l3.2-15c.3-1.3-.5-1.9-1.4-1.5zM9.2 14.6l9.2-5.8c.4-.3.8-.1.5.2l-7.8 7-.3 3.4-1.6-4.8z" />
+    </svg>
+  );
+}
+
+function VoiceProgressPlayer({ src }: { src: string }) {
+  const audioRef = useRef<HTMLAudioElement>(null);
+  const [playing, setPlaying] = useState(false);
+  const [current, setCurrent] = useState(0);
+  const [duration, setDuration] = useState(0);
+
+  useEffect(() => {
+    return () => {
+      audioRef.current?.pause();
+    };
+  }, []);
+
+  function toggle(e: MouseEvent) {
+    e.stopPropagation();
+    e.preventDefault();
+    const audio = audioRef.current;
+    if (!audio) return;
+    if (!audio.paused) {
+      audio.pause();
+      return;
+    }
+    void audio.play().catch(() => setPlaying(false));
+  }
+
+  function seek(e: MouseEvent<HTMLButtonElement>) {
+    e.stopPropagation();
+    e.preventDefault();
+    const audio = audioRef.current;
+    if (!audio || !Number.isFinite(duration) || duration <= 0) return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    const next = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
+    audio.currentTime = next * duration;
+    setCurrent(audio.currentTime);
+  }
+
+  const ratio = duration > 0 && Number.isFinite(duration) ? Math.min(1, current / duration) : 0;
+  const shown = Math.floor(current > 0 || playing ? current : duration && Number.isFinite(duration) ? duration : 0);
+
+  return (
+    <div
+      dir="ltr"
+      className="mb-1 flex w-[240px] max-w-full items-center gap-2.5"
+      onClick={(e) => e.stopPropagation()}
+      onPointerDown={(e) => e.stopPropagation()}
+    >
+      <button
+        type="button"
+        onClick={toggle}
+        className="flex size-9 shrink-0 items-center justify-center rounded-full bg-[#517da2] text-white"
+        aria-label={playing ? ar.pauseVoice : ar.playVoice}
+      >
+        {playing ? <Pause className="size-4" /> : <Play className="size-4 translate-x-px" />}
+      </button>
+      <div className="min-w-0 flex-1">
+        <button
+          type="button"
+          className="relative flex h-4 w-full items-center"
+          onClick={seek}
+          aria-label={ar.playVoice}
+        >
+          <span className="absolute inset-x-0 h-1.5 rounded-full bg-black/15" />
+          <span className="absolute start-0 h-1.5 rounded-full bg-[#517da2]" style={{ width: `${ratio * 100}%` }} />
+        </button>
+        <div className="mt-1 text-[11px] tabular-nums text-black/50">{recordClock(shown)}</div>
+      </div>
+      <audio
+        ref={audioRef}
+        className="hidden"
+        src={src}
+        preload="metadata"
+        onLoadedMetadata={(e) => {
+          const next = e.currentTarget.duration;
+          if (Number.isFinite(next)) setDuration(next);
+        }}
+        onDurationChange={(e) => {
+          const next = e.currentTarget.duration;
+          if (Number.isFinite(next)) setDuration(next);
+        }}
+        onTimeUpdate={(e) => setCurrent(e.currentTarget.currentTime)}
+        onPlay={() => setPlaying(true)}
+        onPause={() => setPlaying(false)}
+        onEnded={() => {
+          setPlaying(false);
+          setCurrent(0);
+        }}
+      />
+    </div>
+  );
+}
+
 function ChatMedia({ msg }: { msg: ChatMsg }) {
   const [objectUrl, setObjectUrl] = useState<string | null>(null);
   const [failed, setFailed] = useState(false);
@@ -159,7 +283,17 @@ function ChatMedia({ msg }: { msg: ChatMsg }) {
       try {
         const res = await fetch(msg.fileUrl!, { credentials: "include" });
         if (!res.ok) throw new Error("load_failed");
-        const blob = await res.blob();
+        const raw = await res.blob();
+        const headerType = (res.headers.get("content-type") || "").split(";")[0];
+        const fromName = /\.(ogg|oga|opus)$/i.test(msg.filename || "")
+          ? "audio/ogg"
+          : /\.webm$/i.test(msg.filename || "")
+            ? "audio/webm"
+            : /\.mp3$/i.test(msg.filename || "")
+              ? "audio/mpeg"
+              : "";
+        const mime = ((msg.mimeType || headerType || fromName || raw.type || "").split(";")[0] || "").toLowerCase();
+        const blob = mime.startsWith("audio/") && raw.type !== mime ? new Blob([await raw.arrayBuffer()], { type: mime }) : raw;
         if (cancelled) return;
         blobUrl = URL.createObjectURL(blob);
         setObjectUrl(blobUrl);
@@ -199,6 +333,16 @@ function ChatMedia({ msg }: { msg: ChatMsg }) {
         className="mb-1 max-h-64 max-w-full rounded-xl object-cover"
       />
     );
+  }
+
+  if (isAudioMsg(msg)) {
+    if (!msg.fileUrl) {
+      return msg.filename ? <div className="mb-1 text-xs opacity-80">{msg.filename}</div> : null;
+    }
+    if (!objectUrl) {
+      return <div className="mb-1 h-10 max-w-full animate-pulse rounded-full bg-black/10" />;
+    }
+    return <VoiceProgressPlayer src={objectUrl} />;
   }
 
   if (msg.kind === "document" || msg.filename || msg.fileUrl) {
@@ -596,7 +740,7 @@ function ChatBubble({
         ) : null}
         <div dir="rtl" className="text-start">
           <ChatMedia msg={msg} />
-          {msg.text ? (
+          {msg.text && !(isAudioMsg(msg) && isVoiceCaption(msg.text)) ? (
             <div
               className={cn(
                 "whitespace-pre-wrap break-words text-[15px] leading-snug text-[#111]",
@@ -676,6 +820,8 @@ export function OrderChatDialog({
   const [text, setText] = useState("");
   const [file, setFile] = useState<File | null>(null);
   const [sending, setSending] = useState(false);
+  const [recording, setRecording] = useState(false);
+  const [recordSec, setRecordSec] = useState(0);
   const [panelOpen, setPanelOpen] = useState(false);
   const [orderTab, setOrderTab] = useState<OrderStatus>("PENDING");
   const [serviceId, setServiceId] = useState("all");
@@ -691,6 +837,10 @@ export function OrderChatDialog({
   const shellRef = useRef<HTMLDivElement>(null);
   const fileInput = useRef<HTMLInputElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
+  const recorderRef = useRef<MediaRecorder | null>(null);
+  const recordChunks = useRef<Blob[]>([]);
+  const recordTimer = useRef(0);
+  const recordMime = useRef("audio/webm");
   const openedFor = useRef<string | null>(null);
   const prependHeight = useRef<number | null>(null);
   const stickToBottom = useRef(true);
@@ -710,6 +860,15 @@ export function OrderChatDialog({
       setEditing(null);
       setMenu(null);
       setDeleteTarget(null);
+      const rec = recorderRef.current;
+      window.clearInterval(recordTimer.current);
+      if (rec && rec.state !== "inactive") {
+        rec.onstop = () => rec.stream.getTracks().forEach((track) => track.stop());
+        rec.stop();
+      }
+      recorderRef.current = null;
+      setRecording(false);
+      setRecordSec(0);
     }
   }, [open]);
 
@@ -910,14 +1069,88 @@ export function OrderChatDialog({
     }
   }
 
+  function discardRecording() {
+    const rec = recorderRef.current;
+    window.clearInterval(recordTimer.current);
+    recordChunks.current = [];
+    if (rec && rec.state !== "inactive") {
+      rec.onstop = () => rec.stream.getTracks().forEach((track) => track.stop());
+      rec.stop();
+    }
+    recorderRef.current = null;
+    setRecording(false);
+    setRecordSec(0);
+  }
+
+  function stopRecording(): Promise<File | null> {
+    const rec = recorderRef.current;
+    window.clearInterval(recordTimer.current);
+    if (!rec || rec.state === "inactive") {
+      setRecording(false);
+      return Promise.resolve(null);
+    }
+    return new Promise((resolve) => {
+      rec.onstop = () => {
+        rec.stream.getTracks().forEach((track) => track.stop());
+        const raw = recordMime.current || "audio/webm";
+        const type = raw.split(";")[0] || "audio/webm";
+        const ext = type.includes("ogg") ? "ogg" : type.includes("mp4") ? "m4a" : "webm";
+        const blob = new Blob(recordChunks.current, { type });
+        recorderRef.current = null;
+        recordChunks.current = [];
+        setRecording(false);
+        setRecordSec(0);
+        if (blob.size < 800) {
+          resolve(null);
+          return;
+        }
+        resolve(new File([blob], `voice.${ext}`, { type }));
+      };
+      rec.stop();
+    });
+  }
+
+  async function startRecording() {
+    if (recording || sending || editing) return;
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const mime = ["audio/webm;codecs=opus", "audio/webm", "audio/ogg;codecs=opus", "audio/mp4"].find((type) =>
+        MediaRecorder.isTypeSupported(type),
+      );
+      const rec = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
+      recordMime.current = rec.mimeType || mime || "audio/webm";
+      recordChunks.current = [];
+      rec.ondataavailable = (event) => {
+        if (event.data.size) recordChunks.current.push(event.data);
+      };
+      rec.start();
+      recorderRef.current = rec;
+      setRecordSec(0);
+      setRecording(true);
+      window.clearInterval(recordTimer.current);
+      recordTimer.current = window.setInterval(() => setRecordSec((sec) => sec + 1), 1000);
+    } catch {
+      toast(ar.micDenied);
+    }
+  }
+
   async function send() {
     if (editing) {
       await saveEdit();
       return;
     }
-    if (!activeId || (!text.trim() && !file)) return;
+    let voiceFile: File | null = null;
+    if (recording) {
+      voiceFile = await stopRecording();
+      if (!voiceFile) {
+        toast(ar.voiceTooShort);
+        return;
+      }
+    }
+    if (!activeId || (!text.trim() && !file && !voiceFile)) return;
     const outgoingText = text.trim();
-    const outgoingFile = file;
+    const outgoingFile = voiceFile ?? file;
+    if (voiceFile) setFile(voiceFile);
     setSending(true);
     try {
       let fileId: string | undefined;
@@ -1030,17 +1263,31 @@ export function OrderChatDialog({
         </div>
       }
       headerActions={
-        <button
-          type="button"
-          className={cn(
-            "rounded-xl p-1.5 text-white/80 transition hover:bg-white/10 hover:text-white",
-            panelOpen && "bg-white/20 text-white",
-          )}
-          aria-label={panelOpen ? ar.hideUserOrders : ar.showUserOrders}
-          onClick={() => setPanelOpen((v) => !v)}
-        >
-          <ClipboardList className="size-5" />
-        </button>
+        <div className="flex items-center">
+          {peer ? (
+            <a
+              href={telegramChatHref(peer)}
+              target={peer.username ? "_blank" : undefined}
+              rel="noreferrer"
+              className="rounded-xl p-1.5 text-white/80 transition hover:bg-white/10 hover:text-white"
+              aria-label={ar.openTelegram}
+              title={ar.openTelegram}
+            >
+              <TelegramMark className="size-5" />
+            </a>
+          ) : null}
+          <button
+            type="button"
+            className={cn(
+              "rounded-xl p-1.5 text-white/80 transition hover:bg-white/10 hover:text-white",
+              panelOpen && "bg-white/20 text-white",
+            )}
+            aria-label={panelOpen ? ar.hideUserOrders : ar.showUserOrders}
+            onClick={() => setPanelOpen((v) => !v)}
+          >
+            <ClipboardList className="size-5" />
+          </button>
+        </div>
       }
       size="sm"
       className={cn(
@@ -1153,7 +1400,16 @@ export function OrderChatDialog({
               accept=".png,.jpg,.jpeg,.webp,.pdf,.txt,.csv,.zip,.doc,.docx,.xls,.xlsx,.ppt,.pptx,image/*,application/pdf"
               onChange={(e) => setFile(e.target.files?.[0] ?? null)}
             />
-            {editing ? null : (
+            {editing ? null : recording ? (
+              <button
+                type="button"
+                className="mb-0.5 rounded-full p-2 text-red-500 hover:bg-red-50"
+                onClick={discardRecording}
+                aria-label={ar.cancel}
+              >
+                <Trash2 className="size-5" />
+              </button>
+            ) : (
               <button
                 type="button"
                 className="mb-0.5 rounded-full p-2 text-muted-foreground hover:bg-muted"
@@ -1164,7 +1420,7 @@ export function OrderChatDialog({
               </button>
             )}
             <div className="min-w-0 flex-1">
-              {file ? (
+              {file && !recording ? (
                 <div className="mb-1 flex items-center gap-2 rounded-lg bg-muted px-2 py-1 text-xs">
                   <span className="truncate">{file.name}</span>
                   <button type="button" onClick={() => setFile(null)} aria-label={ar.delete}>
@@ -1172,26 +1428,45 @@ export function OrderChatDialog({
                   </button>
                 </div>
               ) : null}
-              <textarea
-                ref={composerRef}
-                rows={1}
-                value={text}
-                onChange={(e) => setText(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" && !e.shiftKey) {
-                    e.preventDefault();
-                    void send();
-                  }
-                }}
-                placeholder={editing && hasMedia(editing) ? ar.editCaption : ar.typeMessage}
-                className="max-h-28 w-full resize-none rounded-2xl border border-border bg-background px-3 py-2 text-sm outline-none"
-              />
+              {recording ? (
+                <div className="flex h-10 items-center gap-2 rounded-2xl bg-red-50 px-3 text-sm text-red-600">
+                  <span className="size-2 shrink-0 animate-pulse rounded-full bg-red-500" />
+                  <span className="tabular-nums">{recordClock(recordSec)}</span>
+                  <span className="truncate text-xs">{ar.promptRecording}</span>
+                </div>
+              ) : (
+                <textarea
+                  ref={composerRef}
+                  rows={1}
+                  value={text}
+                  onChange={(e) => setText(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && !e.shiftKey) {
+                      e.preventDefault();
+                      void send();
+                    }
+                  }}
+                  placeholder={editing && hasMedia(editing) ? ar.editCaption : ar.typeMessage}
+                  className="max-h-28 w-full resize-none rounded-2xl border border-border bg-background px-3 py-2 text-sm outline-none"
+                />
+              )}
             </div>
+            {editing || recording ? null : (
+              <button
+                type="button"
+                className="mb-0.5 flex size-10 items-center justify-center rounded-full text-[#517da2] hover:bg-[#517da2]/10"
+                onClick={() => void startRecording()}
+                aria-label={ar.recordVoice}
+                title={ar.recordVoice}
+              >
+                <Mic className="size-5" />
+              </button>
+            )}
             <button
               type="submit"
               disabled={
                 sending ||
-                (editing ? !text.trim() && !hasMedia(editing) : !text.trim() && !file)
+                (editing ? !text.trim() && !hasMedia(editing) : !recording && !text.trim() && !file)
               }
               className="mb-0.5 flex size-10 items-center justify-center rounded-full bg-[#517da2] text-white disabled:opacity-40"
               aria-label={editing ? ar.save : ar.send}

@@ -184,21 +184,24 @@ beforeEach(() => {
 describe("transition rules", () => {
   it("defines exactly the complaint lifecycle", () => {
     expect(TRANSITIONS).toEqual({
-      PENDING: ["REVIEWING", "REJECTED"],
-      REVIEWING: ["IN_PROGRESS", "REJECTED"],
-      IN_PROGRESS: ["RESOLVED"],
+      PENDING: ["REVIEWING", "REJECTED", "RESOLVED", "CLOSED"],
+      REVIEWING: ["IN_PROGRESS", "REJECTED", "RESOLVED", "CLOSED"],
+      IN_PROGRESS: ["RESOLVED", "CLOSED"],
       RESOLVED: ["CLOSED"],
-      REJECTED: [],
-      CLOSED: [],
+      REJECTED: ["RESOLVED", "CLOSED"],
+      CLOSED: ["RESOLVED"],
     });
   });
 
-  it("rejects nonsensical transitions", () => {
-    expect(canTransition("PENDING", "RESOLVED")).toBe(false);
-    expect(canTransition("PENDING", "CLOSED")).toBe(false);
+  it("allows resolved and closed from any status", () => {
+    for (const from of ["PENDING", "REVIEWING", "IN_PROGRESS", "REJECTED", "CLOSED"] as const) {
+      expect(canTransition(from, "RESOLVED")).toBe(true);
+    }
+    for (const from of ["PENDING", "REVIEWING", "IN_PROGRESS", "RESOLVED", "REJECTED"] as const) {
+      expect(canTransition(from, "CLOSED")).toBe(true);
+    }
+    expect(canTransition("PENDING", "IN_PROGRESS")).toBe(false);
     expect(canTransition("IN_PROGRESS", "REJECTED")).toBe(false);
-    expect(canTransition("IN_PROGRESS", "CLOSED")).toBe(false);
-    expect(canTransition("REJECTED", "CLOSED")).toBe(false);
     expect(canTransition("CLOSED", "REVIEWING")).toBe(false);
     expect(canTransition("RESOLVED", "IN_PROGRESS")).toBe(false);
   });
@@ -311,11 +314,11 @@ describe("OrderService.changeStatus", () => {
 
   it("rejects invalid transitions without side effects", async () => {
     const id = await seedOrder("PENDING");
-    await expect(OrderService.changeStatus({ orderId: id, next: "RESOLVED", actorId: ADMIN_ID })).rejects.toThrow(
+    await expect(OrderService.changeStatus({ orderId: id, next: "IN_PROGRESS", actorId: ADMIN_ID })).rejects.toThrow(
       "INVALID_TRANSITION",
     );
-    const rejected = await seedOrder("REJECTED");
-    await expect(OrderService.changeStatus({ orderId: rejected, next: "CLOSED", actorId: ADMIN_ID })).rejects.toThrow(
+    const closed = await seedOrder("CLOSED");
+    await expect(OrderService.changeStatus({ orderId: closed, next: "REVIEWING", actorId: ADMIN_ID })).rejects.toThrow(
       "INVALID_TRANSITION",
     );
     expect(orderDoc(id).status).toBe("PENDING");
@@ -433,7 +436,7 @@ describe("POST /api/orders/[id]/status", () => {
     const bad = await statusRequest(id, { status: "DONE" });
     expect(bad.status).toBe(400);
     expect((await bad.json()).message).toBe(STATUS_ERROR_AR.INVALID_STATUS);
-    const invalid = await statusRequest(id, { status: "CLOSED" });
+    const invalid = await statusRequest(id, { status: "IN_PROGRESS" });
     expect(invalid.status).toBe(400);
     expect(await invalid.json()).toEqual({ error: "INVALID_TRANSITION", message: STATUS_ERROR_AR.INVALID_TRANSITION });
   });
@@ -566,11 +569,11 @@ describe("status change dialog", () => {
     const html = fields("PENDING", null);
     expect(html).toContain('value="REVIEWING"');
     expect(html).toContain('value="REJECTED"');
-    expect(html).not.toContain('value="RESOLVED"');
-    expect(html).not.toContain('value="CLOSED"');
+    expect(html).toContain('value="RESOLVED"');
+    expect(html).toContain('value="CLOSED"');
     expect(html).not.toContain("سبب الرفض");
-    expect(fields("CLOSED", null)).toContain("هذه حالة نهائية");
-    expect(fields("REJECTED", null)).not.toContain('type="radio"');
+    expect(fields("CLOSED", null)).toContain('value="RESOLVED"');
+    expect(fields("REJECTED", null)).toContain('value="CLOSED"');
   });
 
   it("shows a required rejection reason for REJECTED", () => {

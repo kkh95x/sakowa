@@ -29,6 +29,39 @@ describe("OrderFilterBuilder", () => {
     const q = OrderFilterBuilder.build([{ field: "$where", operator: "eq", value: "1" }]);
     expect(q).toEqual({});
   });
+
+  it("matches a dynamic voice answer against its transcript", () => {
+    const q = OrderFilterBuilder.build(
+      [{ field: "name", operator: "contains", value: "أحمد" }],
+      [{ name: "name", type: "DYNAMIC" }],
+    );
+    expect(q).toEqual({
+      $and: [
+        {
+          $or: [
+            { "fields.name": { $regex: "أحمد", $options: "i" } },
+            { "fields.name.text": { $regex: "أحمد", $options: "i" } },
+            { "fields.name.transcript.text": { $regex: "أحمد", $options: "i" } },
+            { "fields.name.filename": { $regex: "أحمد", $options: "i" } },
+          ],
+        },
+      ],
+    });
+  });
+
+  it("filters complaints by telegram username", () => {
+    const q = OrderFilterBuilder.build([{ field: "telegramUsername", operator: "contains", value: "@karim" }]);
+    expect(q).toEqual({
+      $and: [
+        {
+          $or: [
+            { telegramUsername: { $regex: "karim", $options: "i" } },
+            { telegramName: { $regex: "karim", $options: "i" } },
+          ],
+        },
+      ],
+    });
+  });
 });
 
 describe("OrderStatusService", () => {

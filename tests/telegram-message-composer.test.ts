@@ -43,7 +43,7 @@ const text = (id: string, value: string): TelegramPromptBlock => ({ id, type: "t
 const image = (id: string, storageId = IMG): TelegramPromptBlock => ({ id, type: "image", storageId });
 const doc = (id: string, storageId = PDF): TelegramPromptBlock => ({ id, type: "document", storageId });
 
-type Call = { method: "text" | "photo" | "document"; value: string; extra?: Record<string, unknown> };
+type Call = { method: "text" | "photo" | "document" | "audio"; value: string; extra?: Record<string, unknown> };
 function recordingSender(fail: Partial<Record<Call["method"], boolean>> = {}) {
   const calls: Call[] = [];
   const logs: string[] = [];
@@ -62,6 +62,10 @@ function recordingSender(fail: Partial<Record<Call["method"], boolean>> = {}) {
     async sendDocument(storageId, _name, extra) {
       if (fail.document) throw new Error("document failed");
       calls.push({ method: "document", value: storageId, extra });
+    },
+    async sendAudio(storageId, _name, extra) {
+      if (fail.audio) throw new Error("audio failed");
+      calls.push({ method: "audio", value: storageId, extra });
     },
   };
   return { calls, sender, logs };
@@ -90,6 +94,14 @@ describe("telegram message composer: block validation and storage", () => {
     expect(verified.blocks[0]).toMatchObject({ type: "image", storageId: IMG, fileName: "example.png", mimeType: "image/png", size: 2048 });
     const { calls } = await render(verified.blocks);
     expect(calls.map((c) => c.method)).toEqual(["photo"]);
+  });
+
+  it("3b. audio clip", async () => {
+    const voice = "f".repeat(24);
+    const blocks: TelegramPromptBlock[] = [{ id: "a", type: "audio", storageId: voice, fileName: "voice.ogg" }];
+    expect(validatePromptBlocks(blocks)).toEqual([]);
+    const { calls } = await render(blocks);
+    expect(calls.map((c) => c.method)).toEqual(["audio"]);
   });
 
   it("3. document only", async () => {
@@ -153,6 +165,7 @@ describe("telegram message composer: block validation and storage", () => {
     expect(codes([text("t", "   ")])).toEqual(["EMPTY_TEXT"]);
     expect(codes([{ id: "i", type: "image", storageId: "" }])).toEqual(["MISSING_IMAGE"]);
     expect(codes([{ id: "d", type: "document", storageId: "" }])).toEqual(["MISSING_DOCUMENT"]);
+    expect(codes([{ id: "a", type: "audio", storageId: "" }])).toEqual(["MISSING_AUDIO"]);
     expect(codes([{ id: "i", type: "image", storageId: "../etc/passwd" }])).toEqual(["INVALID_STORAGE_ID"]);
     expect(codes([{ id: "v", type: "voice", storageId: IMG }])).toEqual(["UNSUPPORTED_BLOCK"]);
     expect(codes([{ type: "text", text: "x" }])).toEqual(["INVALID_BLOCK"]);
@@ -268,6 +281,7 @@ describe("telegram message composer: rendering and sending", () => {
 
   it("appends the answer hint to the last text block, or adds one", () => {
     const hint = fieldAnswerHint("DYNAMIC")!;
+    expect(hint).toBe("يمكنك الاجابة بمقطع صوتي او نص");
     const merged = withPromptHint([text("t", "يرجى إرسال المستند المطلوب"), doc("d")], hint);
     expect(merged[0]).toMatchObject({ type: "text", text: `يرجى إرسال المستند المطلوب\n\n${hint}` });
     expect(merged[1].type).toBe("document");

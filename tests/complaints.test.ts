@@ -92,6 +92,10 @@ describe("complaint status transitions", () => {
     expect(canTransition("RESOLVED", "CLOSED")).toBe(true);
     expect(canTransition("PENDING", "REJECTED")).toBe(true);
     expect(canTransition("REVIEWING", "REJECTED")).toBe(true);
+    expect(canTransition("PENDING", "RESOLVED")).toBe(true);
+    expect(canTransition("PENDING", "CLOSED")).toBe(true);
+    expect(canTransition("REJECTED", "RESOLVED")).toBe(true);
+    expect(canTransition("REJECTED", "CLOSED")).toBe(true);
     expect(canTransition("IN_PROGRESS", "REJECTED")).toBe(false);
     expect(canTransition("CLOSED", "PENDING")).toBe(false);
   });

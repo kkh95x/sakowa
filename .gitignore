@@ -31,3 +31,6 @@ coverage
 
 # docker local
 .env.docker
+
+# Whisper / Transformers.js model cache
+.cache

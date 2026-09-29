@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
@@ -13,11 +13,12 @@ import {
   RotateCw,
   Square,
   Trash2,
+  Upload,
 } from "lucide-react";
 import { ar } from "@/i18n/ar";
-import { Button } from "@/components/ui/button";
+import { Button, buttonClass } from "@/components/ui/button";
 import { Dialog } from "@/components/ui/dialog";
-import { Input } from "@/components/ui/input";
+import { Input, Textarea } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge, type BadgeTone } from "@/components/ui/badge";
 import { Card, EmptyState, PageHeader, Skeleton } from "@/components/ui/card";
@@ -56,7 +57,11 @@ export default function BotsPage() {
   const [loaded, setLoaded] = useState(false);
   const [bots, setBots] = useState<Bot[]>([]);
   const [name, setName] = useState("");
+  const [details, setDetails] = useState("");
   const [token, setToken] = useState("");
+  const [logoFile, setLogoFile] = useState<File | null>(null);
+  const [logoPreview, setLogoPreview] = useState<string | null>(null);
+  const logoPreviewRef = useRef<string | null>(null);
   const [creating, setCreating] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
@@ -75,25 +80,62 @@ export default function BotsPage() {
     load();
   }, []);
 
+  function pickLogo(file: File | null) {
+    if (logoPreviewRef.current) URL.revokeObjectURL(logoPreviewRef.current);
+    const next = file ? URL.createObjectURL(file) : null;
+    logoPreviewRef.current = next;
+    setLogoFile(file);
+    setLogoPreview(next);
+  }
+
+  function resetCreateForm() {
+    setName("");
+    setDetails("");
+    setToken("");
+    pickLogo(null);
+  }
+
   async function createBot(e: React.FormEvent) {
     e.preventDefault();
     setCreating(true);
     const res = await fetch("/api/bots", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name, token }),
+      body: JSON.stringify({ name, token, details }),
     });
-    setCreating(false);
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
+      setCreating(false);
       const msg = typeof data.error === "string" ? data.error : ar.botCreateFailed;
       toast(msg.startsWith("TELEGRAM_UNREACHABLE") ? ar.telegramUnreachable : msg, "error");
       return;
     }
-    setName("");
-    setToken("");
+
+    let notice: string = ar.botCreated;
+    let failed = false;
+    if (logoFile && data.id) {
+      const fd = new FormData();
+      fd.append("file", logoFile);
+      const logoRes = await fetch(`/api/bots/${data.id}/logo`, { method: "POST", body: fd });
+      if (!logoRes.ok) {
+        notice = ar.botLogoFailed;
+        failed = true;
+      }
+    }
+    if (data.id && (details.trim() || logoFile)) {
+      const syncRes = await fetch(`/api/bots/${data.id}/sync`, { method: "POST" });
+      const syncData = await syncRes.json().catch(() => ({}));
+      if (!syncRes.ok) {
+        notice = ar.botSyncFailed;
+        failed = true;
+      } else if (syncData?.result?.photoError && notice === ar.botCreated) {
+        notice = ar.botSyncPartial;
+      }
+    }
+    setCreating(false);
+    resetCreateForm();
     setCreateOpen(false);
-    toast(ar.botCreated);
+    toast(notice, failed ? "error" : "success");
     load();
   }
 
@@ -155,8 +197,36 @@ export default function BotsPage() {
       >
         <form id="create-bot-form" onSubmit={createBot} className="space-y-4">
           <div>
+            <Label>{ar.botLogo}</Label>
+            <div className="flex items-center gap-3">
+              <div className="flex size-16 shrink-0 items-center justify-center overflow-hidden rounded-2xl border border-border bg-muted">
+                {logoPreview ? (
+                  // eslint-disable-next-line @next/next/no-img-element
+                  <img src={logoPreview} alt="" className="size-full object-cover" />
+                ) : (
+                  <BotIcon className="size-6 text-muted-foreground" />
+                )}
+              </div>
+              <label className={buttonClass("outline", "sm", "cursor-pointer")}>
+                <Upload className="size-3.5" />
+                {ar.chooseLogo}
+                <input
+                  type="file"
+                  accept="image/png,image/jpeg,image/webp"
+                  className="sr-only"
+                  onChange={(e) => pickLogo(e.target.files?.[0] ?? null)}
+                />
+              </label>
+            </div>
+            {logoFile ? <div className="mt-1.5 text-xs text-muted-foreground">{logoFile.name}</div> : null}
+          </div>
+          <div>
             <Label htmlFor="bot-name">{ar.name}</Label>
             <Input id="bot-name" value={name} onChange={(e) => setName(e.target.value)} required />
+          </div>
+          <div>
+            <Label htmlFor="bot-details">{ar.botDescription}</Label>
+            <Textarea id="bot-details" value={details} onChange={(e) => setDetails(e.target.value)} rows={4} />
           </div>
           <div>
             <Label htmlFor="bot-token">{ar.botToken}</Label>

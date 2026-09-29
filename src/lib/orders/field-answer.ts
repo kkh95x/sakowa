@@ -1,4 +1,5 @@
 import { ar } from "@/i18n/ar";
+import type { VoiceTranscript } from "@/lib/telegram/normalize-input";
 import type { RequestField } from "@/types";
 
 export type FieldAnswer = {
@@ -10,7 +11,22 @@ export type FieldAnswer = {
   mimeType?: string;
   contentType?: string;
   metadata?: Record<string, unknown>;
+  transcript?: VoiceTranscript;
 };
+
+function readTranscript(value: unknown): VoiceTranscript | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const transcript = (value as { transcript?: { status?: string; text?: string | null } }).transcript;
+  if (!transcript) return undefined;
+  if (transcript.status !== "pending" && transcript.status !== "ready" && transcript.status !== "failed") return undefined;
+  const text = typeof transcript.text === "string" ? transcript.text.trim() : "";
+  return { status: transcript.status, text: text || null };
+}
+
+export function orderHasPendingTranscript(fields: Record<string, unknown> | undefined) {
+  if (!fields) return false;
+  return Object.values(fields).some((value) => readTranscript(value)?.status === "pending");
+}
 
 function isTelegramFileId(value: string) {
   return /^[A-Za-z0-9_-]{20,}$/.test(value);
@@ -98,6 +114,7 @@ export function parseFieldAnswer(value: unknown, fieldType?: string): FieldAnswe
         mimeType: meta.mimeType ?? undefined,
         contentType: meta.contentType,
         metadata: meta.metadata,
+        transcript: kind === "audio" ? readTranscript(value) : undefined,
       };
     }
     if (meta.telegramFileId || meta.kind || meta.gridFsId || meta.fileId || meta.storageId) {
@@ -177,6 +194,9 @@ export function fieldAnswerFileUrls(orderId: string, fieldName: string, answer: 
 }
 
 export function fieldAnswerLabel(answer: FieldAnswer) {
+  if (answer.kind === "audio" && answer.transcript?.status === "ready" && answer.transcript.text) {
+    return answer.transcript.text;
+  }
   if (answer.kind === "file" || answer.kind === "image") return answer.text;
   return answer.text;
 }

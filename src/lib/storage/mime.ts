@@ -42,6 +42,7 @@ export const ALLOWED_UPLOAD_MIMES = new Set([
   "image/webp",
   "image/gif",
   "audio/ogg",
+  "audio/webm",
   "audio/mpeg",
   "audio/mp4",
   "audio/wav",

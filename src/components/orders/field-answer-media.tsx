@@ -1,8 +1,8 @@
 "use client";
 
-import { useEffect, useMemo, useState, type MouseEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type MouseEvent } from "react";
 import * as DialogPrimitive from "@radix-ui/react-dialog";
-import { Download, FileIcon, FileText, ImageIcon, Minus, Plus, X } from "lucide-react";
+import { Download, FileIcon, FileText, ImageIcon, Loader2, Minus, Pause, Play, Plus, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { detectMediaType, fieldAnswerFileUrls, type FieldAnswer } from "@/lib/orders/field-answer";
 import { ar } from "@/i18n/ar";
@@ -296,6 +296,19 @@ export function FieldAnswerMedia({
         </div>
       ) : null}
 
+      {answer.kind === "audio" && answer.transcript ? (
+        <div className="mt-3 rounded-xl border border-border bg-muted/40 px-3 py-2.5">
+          <div className="text-xs font-semibold text-muted-foreground">{ar.voiceTranscript}</div>
+          {answer.transcript.status === "ready" && answer.transcript.text ? (
+            <p className="mt-1 whitespace-pre-wrap text-[15px] leading-relaxed text-foreground">{answer.transcript.text}</p>
+          ) : (
+            <p className="mt-1 text-sm text-muted-foreground">
+              {answer.transcript.status === "pending" ? ar.voiceTranscriptPending : ar.voiceTranscriptFailed}
+            </p>
+          )}
+        </div>
+      ) : null}
+
       {objectUrl && (mediaType === "image" || mediaType === "pdf") ? (
         <FullscreenViewer
           open={viewerOpen}
@@ -385,5 +398,161 @@ export function CompactFileOpenButton({
         />
       ) : null}
     </>
+  );
+}
+
+let activeVoice: HTMLAudioElement | null = null;
+
+function voiceClock(seconds: number) {
+  if (!Number.isFinite(seconds) || seconds < 0) return "0:00";
+  const whole = Math.floor(seconds);
+  return `${Math.floor(whole / 60)}:${String(whole % 60).padStart(2, "0")}`;
+}
+
+export function InlineVoiceButton({ urls }: { urls: string[] }) {
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const urlRef = useRef<string | null>(null);
+  const pendingSeek = useRef<number | null>(null);
+  const [state, setState] = useState<"idle" | "loading" | "playing">("idle");
+  const [current, setCurrent] = useState(0);
+  const [duration, setDuration] = useState(0);
+
+  useEffect(() => {
+    return () => {
+      audioRef.current?.pause();
+      if (activeVoice === audioRef.current) activeVoice = null;
+      if (urlRef.current) URL.revokeObjectURL(urlRef.current);
+    };
+  }, []);
+
+  function bind(audio: HTMLAudioElement) {
+    const rememberDuration = () => {
+      if (Number.isFinite(audio.duration)) setDuration(audio.duration);
+    };
+    audio.onloadedmetadata = rememberDuration;
+    audio.ondurationchange = rememberDuration;
+    audio.ontimeupdate = () => setCurrent(audio.currentTime);
+    audio.onended = () => {
+      setState("idle");
+      setCurrent(0);
+    };
+    audio.onpause = () => setState((value) => (value === "loading" ? value : "idle"));
+    audio.onplay = () => setState("playing");
+  }
+
+  async function ensureAudio() {
+    if (audioRef.current) return audioRef.current;
+    setState("loading");
+    let blob: Blob | null = null;
+    for (const url of urls) {
+      const res = await fetch(url, { credentials: "include" });
+      if (!res.ok) continue;
+      const next = await res.blob();
+      if (next.type.includes("json") && next.size < 800) continue;
+      blob = next;
+      break;
+    }
+    if (!blob) {
+      setState("idle");
+      return null;
+    }
+    const objectUrl = URL.createObjectURL(blob);
+    urlRef.current = objectUrl;
+    const audio = new Audio(objectUrl);
+    bind(audio);
+    audioRef.current = audio;
+    return audio;
+  }
+
+  function applySeek(audio: HTMLAudioElement, ratio: number) {
+    if (!Number.isFinite(audio.duration) || audio.duration <= 0) {
+      pendingSeek.current = ratio;
+      audio.onloadedmetadata = () => {
+        if (Number.isFinite(audio.duration)) setDuration(audio.duration);
+        if (pendingSeek.current != null && audio.duration > 0) {
+          audio.currentTime = pendingSeek.current * audio.duration;
+          setCurrent(audio.currentTime);
+          pendingSeek.current = null;
+        }
+      };
+      return;
+    }
+    audio.currentTime = ratio * audio.duration;
+    setCurrent(audio.currentTime);
+  }
+
+  async function toggle(e: MouseEvent) {
+    e.stopPropagation();
+    e.preventDefault();
+    if (state === "playing" && audioRef.current) {
+      audioRef.current.pause();
+      return;
+    }
+    if (activeVoice && activeVoice !== audioRef.current) activeVoice.pause();
+    const audio = await ensureAudio();
+    if (!audio) return;
+    activeVoice = audio;
+    try {
+      await audio.play();
+    } catch {
+      setState("idle");
+    }
+  }
+
+  async function seek(e: MouseEvent<HTMLButtonElement>) {
+    e.stopPropagation();
+    e.preventDefault();
+    const rect = e.currentTarget.getBoundingClientRect();
+    const fromLeft = rect.width > 0 ? (e.clientX - rect.left) / rect.width : 0;
+    const ratio = Math.min(1, Math.max(0, 1 - fromLeft));
+    if (activeVoice && activeVoice !== audioRef.current) activeVoice.pause();
+    const audio = await ensureAudio();
+    if (!audio) return;
+    applySeek(audio, ratio);
+    activeVoice = audio;
+    if (audio.paused) {
+      try {
+        await audio.play();
+      } catch {
+        setState("idle");
+      }
+    }
+  }
+
+  const ratio = duration > 0 ? Math.min(1, current / duration) : 0;
+  const shown = current > 0 || state === "playing" ? current : duration;
+
+  return (
+    <div className="flex w-full min-w-[12rem] items-center gap-2" onClick={(e) => e.stopPropagation()}>
+      <button
+        type="button"
+        className="flex size-7 shrink-0 items-center justify-center rounded-full bg-primary text-primary-foreground hover:opacity-90 disabled:opacity-60"
+        onClick={toggle}
+        disabled={state === "loading" || urls.length === 0}
+        aria-label={state === "playing" ? ar.pauseVoice : ar.playVoice}
+        title={state === "playing" ? ar.pauseVoice : ar.playVoice}
+      >
+        {state === "loading" ? (
+          <Loader2 className="size-3.5 animate-spin" />
+        ) : state === "playing" ? (
+          <Pause className="size-3.5" />
+        ) : (
+          <Play className="size-3.5 translate-x-px" />
+        )}
+      </button>
+      <button
+        type="button"
+        className="relative h-4 min-w-[4.5rem] flex-1"
+        onClick={seek}
+        aria-label={ar.playVoice}
+      >
+        <span className="absolute inset-x-0 top-1/2 h-1.5 -translate-y-1/2 rounded-full bg-black/15" />
+        <span
+          className="absolute right-0 top-1/2 h-1.5 -translate-y-1/2 rounded-full bg-primary"
+          style={{ width: `${ratio * 100}%` }}
+        />
+      </button>
+      <span className="shrink-0 text-[11px] tabular-nums text-muted-foreground">{voiceClock(shown)}</span>
+    </div>
   );
 }

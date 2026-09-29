@@ -18,6 +18,7 @@ import type { RequestField } from "@/types";
 import type { BranchingRule } from "@/lib/requests/branching";
 import { validatePromptBlocks } from "@/lib/telegram/field-prompt";
 import { sortFieldsByOrder } from "@/lib/requests/field-order";
+import { COMPLAINT_TEMPLATES, fieldsFromTemplate } from "@/lib/requests/complaint-templates";
 
 type Bot = { id: string; name: string; username: string };
 type Group = { id: string; title: string; chatId?: number; messageThreadId?: number | null };
@@ -55,6 +56,7 @@ export default function RequestsPage() {
   const [saving, setSaving] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
+  const [templateOpen, setTemplateOpen] = useState(false);
 
   async function load() {
     try {
@@ -82,6 +84,23 @@ export default function RequestsPage() {
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  function openFromTemplate(id: string) {
+    const template = COMPLAINT_TEMPLATES.find((item) => item.id === id);
+    if (!template) return;
+    setEditing(null);
+    setForm({
+      ...emptyForm,
+      botId: bots[0]?.id ?? "",
+      active: true,
+      name: template.name,
+      description: template.description,
+      fields: fieldsFromTemplate(template),
+      branchingRules: [],
+    });
+    setTemplateOpen(false);
+    setOpen(true);
+  }
 
   function openCreate() {
     setEditing(null);
@@ -203,10 +222,16 @@ export default function RequestsPage() {
         title={ar.requests}
         description={ar.requestsDescription}
         actions={
-          <Button type="button" onClick={openCreate}>
-            <Plus className="size-4" />
-            {ar.addRequestTab}
-          </Button>
+          <>
+            <Button type="button" variant="outline" onClick={() => setTemplateOpen(true)}>
+              <FolderKanban className="size-4" />
+              {ar.addFromTemplate}
+            </Button>
+            <Button type="button" onClick={openCreate}>
+              <Plus className="size-4" />
+              {ar.addRequestTab}
+            </Button>
+          </>
         }
       />
 
@@ -317,6 +342,27 @@ export default function RequestsPage() {
         </form>
       </Dialog>
 
+      <Dialog
+        open={templateOpen}
+        onOpenChange={setTemplateOpen}
+        title={ar.chooseTemplate}
+        description={ar.templateHint}
+      >
+        <div className="grid gap-2">
+          {COMPLAINT_TEMPLATES.map((template) => (
+            <button
+              key={template.id}
+              type="button"
+              className="rounded-xl border border-border px-4 py-3 text-start transition hover:bg-muted"
+              onClick={() => openFromTemplate(template.id)}
+            >
+              <span className="block text-sm font-semibold">{template.name}</span>
+              <span className="mt-1 block text-xs text-muted-foreground">{template.description}</span>
+            </button>
+          ))}
+        </div>
+      </Dialog>
+
       {!loaded ? (
         <Card className="divide-y divide-border">
           {[0, 1, 2].map((i) => (
@@ -336,10 +382,16 @@ export default function RequestsPage() {
             title={ar.noRequestTabs}
             description={ar.requestsDescription}
             action={
-              <Button type="button" onClick={openCreate}>
-                <Plus className="size-4" />
-                {ar.addRequestTab}
-              </Button>
+              <div className="flex flex-wrap justify-center gap-2">
+                <Button type="button" variant="outline" onClick={() => setTemplateOpen(true)}>
+                  <FolderKanban className="size-4" />
+                  {ar.addFromTemplate}
+                </Button>
+                <Button type="button" onClick={openCreate}>
+                  <Plus className="size-4" />
+                  {ar.addRequestTab}
+                </Button>
+              </div>
             }
           />
         </Card>

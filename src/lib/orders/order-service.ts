@@ -47,6 +47,12 @@ function sameConversation(msg: Record<string, unknown>, order: Record<string, un
   return msgKeys.some((key) => orderKeys.includes(key));
 }
 
+function isVoiceUpload(mimeType: string, filename: string) {
+  const mime = mimeType.split(";")[0].toLowerCase();
+  if (mime.startsWith("audio/")) return true;
+  return /^voice\.(webm|ogg|oga|opus|mp3|m4a|wav)$/i.test(filename);
+}
+
 function tryDecryptStored(value: string): string {
   if (!/^[0-9a-f]+:[0-9a-f]+:[0-9a-f]+$/i.test(value)) return value;
   try {
@@ -115,6 +121,7 @@ export class OrderService {
     requestTypeId: string;
     status: OrderStatus;
     filters?: OrderFilter[];
+    fields?: { name: string; type: RequestField["type"] }[];
     search?: string;
     page?: number;
     pageSize?: number;
@@ -124,7 +131,7 @@ export class OrderService {
     const db = await getDb();
     const page = params.page ?? 1;
     const pageSize = Math.min(params.pageSize ?? 20, 100);
-    const filterQuery = OrderFilterBuilder.build(params.filters ?? []);
+    const filterQuery = OrderFilterBuilder.build(params.filters ?? [], params.fields ?? []);
     const query: Record<string, unknown> = {
       requestTypeId: params.requestTypeId,
       status: statusMongoQuery(params.status),
@@ -459,6 +466,8 @@ export class OrderService {
           if (!file) throw new Error("FILE_NOT_FOUND");
           if (file.mimeType.startsWith("image/")) {
             await TelegramService.sendPhoto(botId, chatId, file.buffer, file.filename, text || undefined);
+          } else if (isVoiceUpload(file.mimeType, file.filename)) {
+            await TelegramService.sendAudio(botId, chatId, file.buffer, file.filename, text ? { caption: text } : undefined);
           } else {
             await TelegramService.sendDocument(botId, chatId, file.buffer, file.filename, text || undefined);
           }
@@ -624,6 +633,7 @@ export class OrderService {
             ? { attachments: [...((order.attachments as string[]) ?? []), params.attachmentFileId] }
             : {}),
         },
+        ...(next === "CLOSED" ? {} : { $unset: { archivedAt: "" } }),
       },
     );
     if (!updated.matchedCount) throw new Error("STATUS_CONFLICT");

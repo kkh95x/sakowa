@@ -12,6 +12,10 @@ const NUMBER_OPS: FilterOperator[] = ["eq", "gt", "gte", "lt", "lte", "between"]
 const SELECT_OPS: FilterOperator[] = ["eq", "neq"];
 const DATE_OPS: FilterOperator[] = ["eq", "before", "after", "between"];
 const BOOL_OPS: FilterOperator[] = ["yes", "no"];
+const USERNAME_OPS: FilterOperator[] = ["contains", "eq", "starts_with", "neq"];
+
+/** Reserved filter key: matches the Telegram username and display name, not an order field. */
+export const USERNAME_FILTER_FIELD = "telegramUsername";
 
 export function operatorsForField(type: FieldType): FilterOperator[] {
   switch (type) {
@@ -32,6 +36,11 @@ export function operatorsForField(type: FieldType): FilterOperator[] {
   }
 }
 
+export function operatorsForFilterField(field: string, type?: FieldType): FilterOperator[] {
+  if (field === USERNAME_FILTER_FIELD) return USERNAME_OPS;
+  return operatorsForField(type ?? "TEXT");
+}
+
 const ALLOWED = new Set<FilterOperator>([
   ...TEXT_OPS,
   ...NUMBER_OPS,
@@ -44,63 +53,71 @@ function escapeRegex(value: string) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+function clause(path: string, operator: FilterOperator, value: unknown, valueTo: unknown): Record<string, unknown> | null {
+  switch (operator) {
+    case "eq":
+      return { [path]: value };
+    case "neq":
+      return { [path]: { $ne: value } };
+    case "contains":
+      return { [path]: { $regex: escapeRegex(String(value)), $options: "i" } };
+    case "not_contains":
+      return { [path]: { $not: { $regex: escapeRegex(String(value)), $options: "i" } } };
+    case "starts_with":
+      return { [path]: { $regex: `^${escapeRegex(String(value))}`, $options: "i" } };
+    case "ends_with":
+      return { [path]: { $regex: `${escapeRegex(String(value))}$`, $options: "i" } };
+    case "gt":
+      return { [path]: { $gt: Number(value) } };
+    case "gte":
+      return { [path]: { $gte: Number(value) } };
+    case "lt":
+      return { [path]: { $lt: Number(value) } };
+    case "lte":
+      return { [path]: { $lte: Number(value) } };
+    case "between":
+      return { [path]: { $gte: Number(value), $lte: Number(valueTo) } };
+    case "before":
+      return { [path]: { $lt: value } };
+    case "after":
+      return { [path]: { $gt: value } };
+    case "yes":
+      return { [path]: true };
+    case "no":
+      return { [path]: false };
+    default:
+      return null;
+  }
+}
+
+function matchPaths(field: string, type: FieldType | undefined) {
+  if (field === USERNAME_FILTER_FIELD) return ["telegramUsername", "telegramName"];
+  const path = `fields.${field}`;
+  if (type === "DYNAMIC") return [path, `${path}.text`, `${path}.transcript.text`, `${path}.filename`];
+  return [path];
+}
+
 export class OrderFilterBuilder {
-  static build(filters: OrderFilter[]): Record<string, unknown> {
+  static build(
+    filters: OrderFilter[],
+    fields: { name: string; type: FieldType }[] = [],
+  ): Record<string, unknown> {
+    const types = new Map(fields.map((field) => [field.name, field.type]));
     const and: Record<string, unknown>[] = [];
     for (const filter of filters) {
       if (!ALLOWED.has(filter.operator)) continue;
-      if (filter.field.includes("$") || filter.field.includes(".")) continue;
-      const path = `fields.${filter.field}`;
-      const value = filter.value;
-      switch (filter.operator) {
-        case "eq":
-          and.push({ [path]: value });
-          break;
-        case "neq":
-          and.push({ [path]: { $ne: value } });
-          break;
-        case "contains":
-          and.push({ [path]: { $regex: escapeRegex(String(value)), $options: "i" } });
-          break;
-        case "not_contains":
-          and.push({ [path]: { $not: { $regex: escapeRegex(String(value)), $options: "i" } } });
-          break;
-        case "starts_with":
-          and.push({ [path]: { $regex: `^${escapeRegex(String(value))}`, $options: "i" } });
-          break;
-        case "ends_with":
-          and.push({ [path]: { $regex: `${escapeRegex(String(value))}$`, $options: "i" } });
-          break;
-        case "gt":
-          and.push({ [path]: { $gt: Number(value) } });
-          break;
-        case "gte":
-          and.push({ [path]: { $gte: Number(value) } });
-          break;
-        case "lt":
-          and.push({ [path]: { $lt: Number(value) } });
-          break;
-        case "lte":
-          and.push({ [path]: { $lte: Number(value) } });
-          break;
-        case "between":
-          and.push({ [path]: { $gte: Number(value), $lte: Number(filter.valueTo) } });
-          break;
-        case "before":
-          and.push({ [path]: { $lt: value } });
-          break;
-        case "after":
-          and.push({ [path]: { $gt: value } });
-          break;
-        case "yes":
-          and.push({ [path]: true });
-          break;
-        case "no":
-          and.push({ [path]: false });
-          break;
-        default:
-          break;
-      }
+      if (filter.field !== USERNAME_FILTER_FIELD && (filter.field.includes("$") || filter.field.includes("."))) continue;
+      const value =
+        filter.field === USERNAME_FILTER_FIELD && typeof filter.value === "string"
+          ? filter.value.trim().replace(/^@+/, "")
+          : filter.value;
+      const paths = matchPaths(filter.field, types.get(filter.field));
+      const parts = paths
+        .map((path) => clause(path, filter.operator, value, filter.valueTo))
+        .filter((part): part is Record<string, unknown> => Boolean(part));
+      if (!parts.length) continue;
+      const negative = filter.operator === "neq" || filter.operator === "not_contains";
+      and.push(parts.length === 1 ? parts[0] : negative ? { $and: parts } : { $or: parts });
     }
     return and.length ? { $and: and } : {};
   }

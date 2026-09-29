@@ -61,14 +61,18 @@ export async function GET(req: Request, ctx: Ctx) {
         uploadedBy: String(order.telegramUserId ?? "telegram"),
         purpose,
       });
+      const current = values[field];
       const nextFields = {
         ...values,
-        [field]: {
-          telegramFileId: answer.telegramFileId,
-          kind: answer.kind === "image" ? "photo" : "document",
-          gridFsId,
-          filename,
-        },
+        [field]:
+          current && typeof current === "object"
+            ? { ...(current as Record<string, unknown>), gridFsId, filename }
+            : {
+                telegramFileId: answer.telegramFileId,
+                kind: answer.kind === "image" ? "photo" : "document",
+                gridFsId,
+                filename,
+              },
       };
       await db.collection(collections.orders).updateOne(
         { _id: new ObjectId(id) },

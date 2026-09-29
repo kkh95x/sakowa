@@ -2,6 +2,8 @@ import { errorToResponse, json, withAuth } from "@/lib/api/http";
 import { GridFSStorageService } from "@/lib/storage/gridfs";
 import { isAllowedUpload, resolveUploadMime } from "@/lib/storage/mime";
 import {
+  PROMPT_AUDIO_MAX_BYTES,
+  PROMPT_AUDIO_MIMES,
   PROMPT_DOCUMENT_MAX_BYTES,
   PROMPT_IMAGE_MAX_BYTES,
   PROMPT_IMAGE_MIMES,
@@ -21,9 +23,13 @@ export async function POST(req: Request) {
     const purposeRaw = String(form.get("purpose") ?? "");
     if (purposeRaw === "BOT_MEDIA") {
       const blockType = String(form.get("blockType") ?? "");
-      if (blockType !== "image" && blockType !== "document") throw new Error("INVALID_BLOCK_TYPE");
-      if (blockType === "image" && !PROMPT_IMAGE_MIMES.includes(mime)) throw new Error("INVALID_MIME");
-      if (buf.length > (blockType === "image" ? PROMPT_IMAGE_MAX_BYTES : PROMPT_DOCUMENT_MAX_BYTES)) {
+      if (blockType !== "image" && blockType !== "document" && blockType !== "audio") throw new Error("INVALID_BLOCK_TYPE");
+      const baseMime = mime.split(";")[0];
+      if (blockType === "image" && !PROMPT_IMAGE_MIMES.includes(baseMime)) throw new Error("INVALID_MIME");
+      if (blockType === "audio" && !PROMPT_AUDIO_MIMES.includes(baseMime)) throw new Error("INVALID_MIME");
+      const maxBytes =
+        blockType === "image" ? PROMPT_IMAGE_MAX_BYTES : blockType === "audio" ? PROMPT_AUDIO_MAX_BYTES : PROMPT_DOCUMENT_MAX_BYTES;
+      if (buf.length > maxBytes) {
         throw new Error("FILE_TOO_LARGE");
       }
     }

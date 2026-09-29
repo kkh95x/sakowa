@@ -70,6 +70,7 @@ export class BotService {
   static async create(params: {
     name: string;
     token: string;
+    details?: string;
     actorId: string;
   }) {
     const json = await telegramBotCall<{ ok: boolean; result?: { username: string; id: number } }>(
@@ -86,6 +87,7 @@ export class BotService {
       telegramBotId: json.result.id,
       tokenEncrypted: encrypt(params.token),
       webhookSecret,
+      details: params.details?.trim() ?? "",
       status: "STOPPED" satisfies BotStatus,
       createdAt: now,
       updatedAt: now,

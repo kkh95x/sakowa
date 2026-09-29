@@ -110,7 +110,7 @@ export class TwoFactorService {
     return true;
   }
 
-  static async disable(userId: string) {
+  static async disable(userId: string, actorUserId = userId) {
     const db = await getDb();
     await db.collection(collections.users).updateOne(
       { _id: new ObjectId(userId) },
@@ -120,10 +120,13 @@ export class TwoFactorService {
       },
     );
     await db.collection(collections.twoFactorRecoveryCodes).deleteMany({ userId });
+    const byAdmin = actorUserId !== userId;
     await audit({
-      actorUserId: userId,
+      actorUserId,
       category: "SECURITY",
-      action: "2FA_DISABLED",
+      action: byAdmin ? "ADMIN_2FA_DISABLED" : "2FA_DISABLED",
+      entityType: "user",
+      entityId: userId,
       before: { twoFactorEnabled: true },
       after: { twoFactorEnabled: false },
     });

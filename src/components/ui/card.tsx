@@ -19,7 +19,7 @@ export function CardHeader({
   className?: string;
 }) {
   return (
-    <div className={cn("flex flex-wrap items-center justify-between gap-3 border-b border-border px-4 py-3 sm:px-5", className)}>
+    <div className={cn("relative z-10 flex flex-wrap items-center justify-between gap-3 border-b border-border bg-card px-4 py-3 sm:px-5", className)}>
       <div className="flex min-w-0 items-center gap-2.5">
         {icon ? <span className="text-muted-foreground [&_svg]:size-4">{icon}</span> : null}
         <div className="min-w-0">

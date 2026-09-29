@@ -5,12 +5,14 @@ import type {
   TelegramPromptBlockType,
 } from "@/types";
 
-export const PROMPT_BLOCK_TYPES: readonly TelegramPromptBlockType[] = ["text", "image", "document"];
+export const PROMPT_BLOCK_TYPES: readonly TelegramPromptBlockType[] = ["text", "image", "document", "audio"];
 export const PROMPT_MAX_BLOCKS = 10;
 export const PROMPT_TEXT_MAX = 4096;
 export const PROMPT_IMAGE_MIMES: readonly string[] = ["image/jpeg", "image/png", "image/webp"];
 export const PROMPT_IMAGE_MAX_BYTES = 10 * 1024 * 1024;
 export const PROMPT_DOCUMENT_MAX_BYTES = 15 * 1024 * 1024;
+export const PROMPT_AUDIO_MAX_BYTES = 10 * 1024 * 1024;
+export const PROMPT_AUDIO_MIMES: readonly string[] = ["audio/webm", "audio/ogg", "audio/mpeg", "audio/mp4", "audio/wav"];
 export const PROMPT_FILE_OWNER_TYPE = "request_field";
 
 export type PromptValidationError = {
@@ -106,7 +108,7 @@ export function applyPromptBlocks<T extends PromptField>(field: T, blocks: Teleg
 export function fieldAnswerHint(type: RequestField["type"]): string | undefined {
   if (type === "FILE") return "📎 أرسل ملفاً.";
   if (type === "IMAGE") return "📷 أرسل صورة.";
-  if (type === "DYNAMIC") return "يمكنك إرسال نص أو صورة أو صوت أو فيديو أو ملف أو موقع أو جهة اتصال.";
+  if (type === "DYNAMIC") return "يمكنك الاجابة بمقطع صوتي او نص";
   return undefined;
 }
 
@@ -177,11 +179,13 @@ export function validatePromptBlocks(blocks: unknown): PromptValidationError[] {
     }
     const storageId = block.storageId;
     if (!storageId) {
-      errors.push({
-        code: block.type === "image" ? "MISSING_IMAGE" : "MISSING_DOCUMENT",
-        message: block.type === "image" ? "عنصر الصورة بدون صورة مرفوعة." : "عنصر الملف بدون ملف مرفوع.",
-        blockId,
-      });
+      const missing =
+        block.type === "image"
+          ? { code: "MISSING_IMAGE", message: "عنصر الصورة بدون صورة مرفوعة." }
+          : block.type === "audio"
+            ? { code: "MISSING_AUDIO", message: "عنصر الصوت بدون تسجيل." }
+            : { code: "MISSING_DOCUMENT", message: "عنصر الملف بدون ملف مرفوع." };
+      errors.push({ ...missing, blockId });
     } else if (!isStorageId(storageId)) {
       errors.push({ code: "INVALID_STORAGE_ID", message: "مرجع ملف غير صالح.", blockId });
     }
@@ -230,6 +234,16 @@ export async function verifyPromptFiles(
       }
       if (file.size > PROMPT_IMAGE_MAX_BYTES) {
         errors.push({ code: "IMAGE_TOO_LARGE", message: "حجم الصورة يتجاوز 10MB.", blockId: block.id });
+        continue;
+      }
+    } else if (block.type === "audio") {
+      const mime = file.mimeType.split(";")[0];
+      if (!PROMPT_AUDIO_MIMES.includes(mime)) {
+        errors.push({ code: "INVALID_AUDIO_MIME", message: "المقطع الصوتي يجب أن يكون بصيغة مدعومة.", blockId: block.id });
+        continue;
+      }
+      if (file.size > PROMPT_AUDIO_MAX_BYTES) {
+        errors.push({ code: "AUDIO_TOO_LARGE", message: "حجم المقطع الصوتي يتجاوز 10MB.", blockId: block.id });
         continue;
       }
     } else if (file.size > PROMPT_DOCUMENT_MAX_BYTES) {

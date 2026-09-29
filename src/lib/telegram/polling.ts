@@ -1,12 +1,35 @@
+import { isBlockedWebhookBase } from "@/lib/telegram/api";
 import { TelegramConversationService } from "@/lib/telegram/conversation";
 import { TelegramService } from "@/lib/telegram/telegram-service";
 import { logJson } from "@/lib/log";
 
-const offsets = new Map<string, number>();
-const running = new Set<string>();
-const loops = new Map<string, Promise<void>>();
+type PollRegistry = {
+  /** Bumped every time this module is evaluated, so a hot reload retires the previous loop. */
+  generation: number;
+  offsets: Map<string, number>;
+  running: Set<string>;
+};
 
-import { isBlockedWebhookBase } from "@/lib/telegram/api";
+const REGISTRY_KEY = "__shakowaTelegramPolling";
+
+function registry(): PollRegistry {
+  const g = globalThis as typeof globalThis & { [REGISTRY_KEY]?: PollRegistry };
+  if (!g[REGISTRY_KEY]) {
+    g[REGISTRY_KEY] = { generation: 0, offsets: new Map(), running: new Set() };
+  }
+  return g[REGISTRY_KEY];
+}
+
+/**
+ * Hot reload evaluates this file again while the previous poll loop is still inside
+ * getUpdates. A second loop would keep serving Telegram updates with the old handlers,
+ * so field audio (and any other send-path fix) never reached the chat. One registry on
+ * globalThis lets the new evaluation take over and the previous loop exit.
+ */
+const replaced = registry();
+const resumeBotIds = [...replaced.running];
+replaced.generation += 1;
+replaced.running = new Set();
 
 export function webhookBaseUsable() {
   const base = (process.env.TELEGRAM_WEBHOOK_BASE_URL ?? "").trim();
@@ -25,21 +48,22 @@ export function shouldUsePolling() {
 }
 
 export function isBotPolling(botId: string) {
-  return running.has(botId);
+  return registry().running.has(botId);
 }
 
 export function stopBotPolling(botId: string) {
-  running.delete(botId);
+  registry().running.delete(botId);
 }
 
 async function pollOnce(botId: string) {
-  const offset = offsets.get(botId) ?? 0;
+  const current = registry();
+  const offset = current.offsets.get(botId) ?? 0;
   const json = await TelegramService.getUpdates(botId, offset, 25);
   if (!json?.ok || !Array.isArray(json.result)) return;
   for (const update of json.result) {
     const updateId = Number(update.update_id);
     if (!Number.isFinite(updateId)) continue;
-    offsets.set(botId, updateId + 1);
+    current.offsets.set(botId, updateId + 1);
     try {
       await TelegramConversationService.process(botId, update);
     } catch (err) {
@@ -52,8 +76,8 @@ async function pollOnce(botId: string) {
   }
 }
 
-async function pollLoop(botId: string) {
-  while (running.has(botId)) {
+async function pollLoop(botId: string, generation: number) {
+  while (registry().generation === generation && registry().running.has(botId)) {
     try {
       await pollOnce(botId);
     } catch (err) {
@@ -67,14 +91,14 @@ async function pollLoop(botId: string) {
 }
 
 export function startBotPolling(botId: string) {
-  if (running.has(botId)) return;
-  running.add(botId);
-  const loop = pollLoop(botId).finally(() => {
-    loops.delete(botId);
-  });
-  loops.set(botId, loop);
+  const current = registry();
+  if (current.running.has(botId)) return;
+  current.running.add(botId);
+  void pollLoop(botId, current.generation);
   logJson("info", "telegram", "polling_started", { botId });
 }
+
+for (const botId of resumeBotIds) startBotPolling(botId);
 
 /** @deprecated use TelegramService.reconnectRunningBots */
 export async function ensurePollingForRunningBots() {

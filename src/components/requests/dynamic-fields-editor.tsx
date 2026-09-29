@@ -8,6 +8,7 @@ import {
   GitBranch,
   ImageIcon,
   ListChecks,
+  Mic,
   MessageSquareText,
   Pencil,
   Plus,
@@ -95,6 +96,7 @@ function FieldRow({
   const hasText = blocks.some((b) => b.type === "text" && b.text.trim());
   const hasImage = blocks.some((b) => b.type === "image");
   const hasDocument = blocks.some((b) => b.type === "document");
+  const hasAudio = blocks.some((b) => b.type === "audio");
   return (
     <button
       type="button"
@@ -127,6 +129,7 @@ function FieldRow({
               {hasText ? <Type className="ms-1 inline size-3" aria-label={ar.promptBlockText} /> : null}
               {hasImage ? <ImageIcon className="ms-1 inline size-3" aria-label={ar.promptBlockImage} /> : null}
               {hasDocument ? <FileText className="ms-1 inline size-3" aria-label={ar.promptBlockDocument} /> : null}
+              {hasAudio ? <Mic className="ms-1 inline size-3" aria-label={ar.promptBlockAudio} /> : null}
             </Badge>
           ) : null}
         </span>

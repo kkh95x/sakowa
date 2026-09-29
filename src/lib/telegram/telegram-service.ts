@@ -18,8 +18,15 @@ import type { OrderStatus, RequestField, TelegramPrompt, TelegramPromptBlock } f
 import { STATUS_AR } from "@/lib/orders/complaint-status";
 import { statusUpdateTelegramText } from "@/lib/telegram/order-command";
 import { resolveFieldPromptBlocks, withPromptHint } from "@/lib/telegram/field-prompt";
-import { defaultWelcomeText, hasWelcomePrompt, resolveWelcomeBlocks } from "@/lib/telegram/welcome-prompt";
+import {
+  WELCOME_CHOOSE_TYPE,
+  WELCOME_GREETING,
+  WELCOME_NO_TYPES,
+  hasWelcomePrompt,
+  resolveWelcomeBlocks,
+} from "@/lib/telegram/welcome-prompt";
 import { TelegramMessageRenderer, type TelegramPromptSender } from "@/lib/telegram/message-renderer";
+import { isWebm, webmOpusToOgg } from "@/lib/telegram/ogg-opus";
 
 export type CaptionableMessage = {
   caption?: string;
@@ -638,6 +645,56 @@ export class TelegramService {
     return json;
   }
 
+  static async sendAudio(
+    botId: string,
+    chatId: number,
+    buffer: Buffer,
+    filename: string,
+    extra?: Record<string, unknown>,
+  ) {
+    const token = await botToken(botId);
+    let payload = buffer;
+    let name = filename;
+    if (filename.toLowerCase().endsWith(".webm") || isWebm(buffer)) {
+      const ogg = webmOpusToOgg(buffer);
+      if (!ogg) throw new Error("WEBM_OPUS_CONVERT_FAILED");
+      payload = ogg;
+      name = "voice.ogg";
+    }
+    const lower = name.toLowerCase();
+    const voice = lower.endsWith(".ogg") || lower.endsWith(".oga");
+    const contentType = voice
+      ? "audio/ogg"
+      : lower.endsWith(".mp3")
+        ? "audio/mpeg"
+        : lower.endsWith(".wav")
+          ? "audio/wav"
+          : "audio/mp4";
+    const fields: Record<string, string> = { chat_id: String(chatId) };
+    const caption = typeof extra?.caption === "string" ? extra.caption.trim() : "";
+    if (caption) fields.caption = caption.slice(0, 1024);
+    if (extra?.reply_markup) fields.reply_markup = JSON.stringify(extra.reply_markup);
+    const json = await telegramUpload(token, voice ? "sendVoice" : "sendAudio", fields, {
+      fieldName: voice ? "voice" : "audio",
+      filename: asciiFilename(name, voice ? "voice.ogg" : "audio.mp3"),
+      contentType,
+      buffer: payload,
+    });
+    if (!json?.ok) throw new Error(String(json?.description ?? "SEND_AUDIO_FAILED"));
+    const media = voice ? json.result?.voice : json.result?.audio;
+    void ChatLogService.captureOutbound({
+      botId,
+      chatId,
+      kind: "document",
+      text: caption || null,
+      filename: name,
+      mimeType: contentType,
+      telegramFileId: media?.file_id ? String(media.file_id) : null,
+      telegramMessageId: telegramMessageId(json),
+    });
+    return json;
+  }
+
   static async syncUserProfilePhoto(botId: string, telegramUserId: number): Promise<string | null> {
     const db = await getDb();
     const existing = await db.collection(collections.telegramUsers).findOne({ telegramUserId });
@@ -723,6 +780,10 @@ export class TelegramService {
         const file = await readFile(storageId);
         return this.sendDocument(botId, chatId, file.buffer, fileName || file.filename, undefined, extra);
       },
+      sendAudio: async (storageId, fileName, extra) => {
+        const file = await readFile(storageId);
+        return this.sendAudio(botId, chatId, file.buffer, fileName || file.filename, extra);
+      },
       log: (level, event, data) => logJson(level, "telegram", event, { botId, chatId, ...data }),
     };
     const result = await TelegramMessageRenderer.send(steps, sender, {
@@ -763,20 +824,24 @@ export class TelegramService {
   }
 
   /**
-   * Sends the bot's /start screen: the administrator's composed welcome blocks, or the
-   * default greeting. The complaint-type keyboard rides on the last delivered block.
+   * Sends the bot's /start screen: the welcome composition first, then a separate
+   * message with the complaint-type keyboard.
    */
   static async sendWelcome(
     botId: string,
     chatId: number,
     params: { bot?: { welcomePrompt?: TelegramPrompt | null } | null; hasActiveTypes: boolean; extra?: Record<string, unknown> },
   ) {
-    return this.sendPromptBlocks(botId, chatId, resolveWelcomeBlocks(params.bot, params.hasActiveTypes), {
-      fallbackText: defaultWelcomeText(params.hasActiveTypes),
-      extra: params.extra,
+    const result = await this.sendPromptBlocks(botId, chatId, resolveWelcomeBlocks(params.bot), {
+      fallbackText: WELCOME_GREETING,
       event: "WELCOME_PROMPT_SENT",
       logData: { custom: hasWelcomePrompt(params.bot), hasActiveTypes: params.hasActiveTypes },
     });
+    if (params.extra) {
+      const menu = params.hasActiveTypes ? WELCOME_CHOOSE_TYPE : WELCOME_NO_TYPES;
+      await this.sendMessage(botId, chatId, menu, params.extra);
+    }
+    return result;
   }
 
   static async notifyUserStatus(

@@ -14,7 +14,11 @@ export async function GET() {
   }
 }
 
-const schema = z.object({ name: z.string().min(1), token: z.string().min(10) });
+const schema = z.object({
+  name: z.string().min(1),
+  token: z.string().min(10),
+  details: z.string().max(2000).optional(),
+});
 
 export async function POST(req: Request) {
   try {

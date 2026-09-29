@@ -33,6 +33,7 @@ import { StatusBadge } from "@/components/orders/status-badge";
 import { StatusChangeDialog } from "@/components/orders/status-change-dialog";
 import { StatusHistoryItem, latestStatusContext, StatusContextNotes } from "@/components/orders/status-history";
 import { buildOrderFieldRows } from "@/lib/orders/order-field-rows";
+import { orderHasPendingTranscript } from "@/lib/orders/field-answer";
 import { parseAdminFields } from "@/lib/orders/admin-fields";
 import { TRANSITIONS, canonicalizeStatus } from "@/lib/orders/complaint-status";
 import type { OrderAdminFields, RequestField } from "@/types";
@@ -41,6 +42,43 @@ const FILE_ACCEPT =
   ".png,.jpg,.jpeg,.webp,.pdf,.txt,.csv,.zip,.doc,.docx,.xls,.xlsx,.ppt,.pptx,image/*,application/pdf";
 
 type DialogKind = "status" | "message" | "attach" | "block" | null;
+
+function avatarColor(id: number) {
+  const hues = [12, 32, 152, 188, 212, 262, 328];
+  return `hsl(${hues[Math.abs(id) % hues.length]} 42% 44%)`;
+}
+
+function initials(name: string) {
+  const parts = name.replace(/^@/, "").trim().split(/\s+/).slice(0, 2);
+  return parts.map((part) => part[0]?.toUpperCase() ?? "").join("") || "U";
+}
+
+function ComplainantAvatar({ name, photoUrl, userId }: { name: string; photoUrl: string | null; userId: number }) {
+  const [failed, setFailed] = useState(false);
+  useEffect(() => {
+    setFailed(false);
+  }, [photoUrl]);
+  if (photoUrl && !failed) {
+    return (
+      // eslint-disable-next-line @next/next/no-img-element
+      <img
+        src={photoUrl}
+        alt=""
+        className="size-16 rounded-full object-cover ring-1 ring-border"
+        onError={() => setFailed(true)}
+      />
+    );
+  }
+  return (
+    <div
+      className="flex size-16 items-center justify-center rounded-full text-lg font-bold text-white ring-1 ring-border"
+      style={{ background: avatarColor(userId) }}
+      aria-hidden
+    >
+      {initials(name)}
+    </div>
+  );
+}
 
 function referencedFileIds(values: Record<string, unknown>) {
   const ids = new Set<string>();
@@ -76,6 +114,7 @@ export default function OrderDetailsPage() {
   }, [id]);
 
   const order = data?.order as Record<string, unknown> | undefined;
+  const photoUrl = typeof data?.photoUrl === "string" ? data.photoUrl : null;
   const history = (data?.history as Record<string, unknown>[]) ?? [];
   const requestType = data?.requestType as
     | { id: string; name: string; fields?: RequestField[] }
@@ -91,6 +130,17 @@ export default function OrderDetailsPage() {
       ),
     [order, requestType],
   );
+
+  const transcriptPending = orderHasPendingTranscript(order?.fields as Record<string, unknown> | undefined);
+  useEffect(() => {
+    if (!transcriptPending) return;
+    const timer = window.setInterval(() => {
+      void fetch(`/api/orders/${id}`)
+        .then((res) => res.json())
+        .then(setData);
+    }, 4000);
+    return () => window.clearInterval(timer);
+  }, [transcriptPending, id]);
 
   const extraFiles = useMemo(() => {
     const all = ((order?.attachments as unknown[]) ?? []).map(String).filter(Boolean);
@@ -364,6 +414,13 @@ export default function OrderDetailsPage() {
         <aside className="space-y-5">
           <Card>
             <CardHeader title={ar.complainantInfo} icon={<UserRound />} />
+            <div className="flex justify-center px-4 pt-4">
+              <ComplainantAvatar
+                name={String(order.telegramName || order.telegramUsername || "")}
+                photoUrl={photoUrl}
+                userId={Number(order.telegramUserId) || 0}
+              />
+            </div>
             <dl className="space-y-3 px-4 py-4 text-sm sm:px-5">
               <div>
                 <dt className="text-xs text-muted-foreground">{ar.telegramName}</dt>

@@ -114,10 +114,10 @@ export interface RequestField {
 
 /**
  * Content the bot sends to ask a field's question (not the user's answer).
- * New block kinds (voice, audio, video, location, buttons, media_group) are added
+ * New block kinds (video, location, buttons, media_group) are added
  * as new union members plus a renderer step; existing blocks stay untouched.
  */
-export type TelegramPromptBlockType = "text" | "image" | "document";
+export type TelegramPromptBlockType = "text" | "image" | "document" | "audio";
 
 export interface TelegramPromptTextBlock {
   id: string;
@@ -125,7 +125,7 @@ export interface TelegramPromptTextBlock {
   text: string;
 }
 
-export interface TelegramPromptMediaBlock<T extends "image" | "document"> {
+export interface TelegramPromptMediaBlock<T extends "image" | "document" | "audio"> {
   id: string;
   type: T;
   storageId: string;
@@ -136,11 +136,13 @@ export interface TelegramPromptMediaBlock<T extends "image" | "document"> {
 
 export type TelegramPromptImageBlock = TelegramPromptMediaBlock<"image">;
 export type TelegramPromptDocumentBlock = TelegramPromptMediaBlock<"document">;
+export type TelegramPromptAudioBlock = TelegramPromptMediaBlock<"audio">;
 
 export type TelegramPromptBlock =
   | TelegramPromptTextBlock
   | TelegramPromptImageBlock
-  | TelegramPromptDocumentBlock;
+  | TelegramPromptDocumentBlock
+  | TelegramPromptAudioBlock;
 
 export interface TelegramPrompt {
   blocks: TelegramPromptBlock[];

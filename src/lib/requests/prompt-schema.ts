@@ -15,6 +15,7 @@ export const telegramPromptBlockSchema = z.discriminatedUnion(
     z.object({ id: blockId, type: z.literal("text"), text: z.string().max(10_000) }),
     z.object({ ...mediaBlock, type: z.literal("image") }),
     z.object({ ...mediaBlock, type: z.literal("document") }),
+    z.object({ ...mediaBlock, type: z.literal("audio") }),
   ],
   { errorMap: () => ({ message: "INVALID_TELEGRAM_MESSAGE:نوع محتوى Telegram غير مدعوم." }) },
 );

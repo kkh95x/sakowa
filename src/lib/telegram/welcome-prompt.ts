@@ -22,15 +22,11 @@ export function hasWelcomePrompt(bot: WelcomeBot) {
 }
 
 /**
- * Blocks the bot sends for /start. Without a custom composition this is the single
- * default text; with one it is the configured blocks, plus the "no active types"
- * notice so that information is never lost.
+ * Blocks sent before the complaint menu. Without a custom composition this is the
+ * default greeting; the complaint list is a separate message that follows.
  */
-export function resolveWelcomeBlocks(bot: WelcomeBot, hasActiveTypes: boolean): TelegramPromptBlock[] {
+export function resolveWelcomeBlocks(bot: WelcomeBot): TelegramPromptBlock[] {
   const blocks = welcomePromptBlocks(bot);
-  if (!blocks.length) {
-    return [{ id: "welcome_default", type: "text", text: defaultWelcomeText(hasActiveTypes) }];
-  }
-  if (hasActiveTypes) return blocks;
-  return [...blocks, { id: "welcome_no_types", type: "text", text: WELCOME_NO_TYPES }];
+  if (!blocks.length) return [{ id: "welcome_default", type: "text", text: WELCOME_GREETING }];
+  return blocks;
 }

@@ -10,6 +10,7 @@ import {
   GripVertical,
   ImageIcon,
   MessageSquareText,
+  Mic,
   Plus,
   Trash2,
   Type,
@@ -32,12 +33,15 @@ import {
 import { cn } from "@/lib/utils";
 import type { TelegramPromptBlock, TelegramPromptBlockType } from "@/types";
 
-type MediaBlock = Extract<TelegramPromptBlock, { type: "image" | "document" }>;
+type MediaBlock = Extract<TelegramPromptBlock, { type: "image" | "document" | "audio" }>;
+
+const BLOCK_TYPES = ["text", "image", "document", "audio"] as const;
 
 const BLOCK_META: Record<TelegramPromptBlockType, { label: string; icon: typeof Type }> = {
   text: { label: ar.promptBlockText, icon: Type },
   image: { label: ar.promptBlockImage, icon: ImageIcon },
   document: { label: ar.promptBlockDocument, icon: FileText },
+  audio: { label: ar.promptBlockAudio, icon: Mic },
 };
 
 export function formatBytes(size?: number) {
@@ -59,6 +63,7 @@ export function TelegramMessageComposer({
   fallbackLabel,
   hint,
   buttons,
+  buttonsLabel,
   title = ar.telegramMessage,
   subtitle = ar.telegramMessageSubtitle,
   emptyHint = ar.promptEmpty,
@@ -71,6 +76,8 @@ export function TelegramMessageComposer({
   fallbackLabel: string;
   hint?: string;
   buttons?: string[];
+  /** Shown above the preview buttons, e.g. the complaint menu that follows a welcome. */
+  buttonsLabel?: string;
   title?: string;
   subtitle?: string;
   emptyHint?: string;
@@ -117,6 +124,14 @@ export function TelegramMessageComposer({
       }
       setLocalUrl(block.id, URL.createObjectURL(file));
     }
+    if (block.type === "audio") {
+      const mime = file.type.split(";")[0];
+      if (!mime.startsWith("audio/")) {
+        setErrors((e) => ({ ...e, [block.id]: ar.micDenied }));
+        return;
+      }
+      setLocalUrl(block.id, URL.createObjectURL(file));
+    }
     setUploading((u) => ({ ...u, [block.id]: true }));
     try {
       const fd = new FormData();
@@ -156,7 +171,7 @@ export function TelegramMessageComposer({
         </Button>
       }
     >
-      {(["text", "image", "document"] as const).map((type) => {
+      {BLOCK_TYPES.map((type) => {
         const Icon = BLOCK_META[type].icon;
         return (
           <DropdownItem key={type} icon={<Icon />} onSelect={() => add(type)}>
@@ -186,7 +201,7 @@ export function TelegramMessageComposer({
             <div className="flex flex-col items-center gap-3 px-4 py-8 text-center">
               <p className="text-sm text-muted-foreground">{emptyHint}</p>
               <div className="flex flex-wrap justify-center gap-2">
-                {(["text", "image", "document"] as const).map((type) => {
+                {BLOCK_TYPES.map((type) => {
                   const Icon = BLOCK_META[type].icon;
                   return (
                     <Button key={type} type="button" variant="outline" size="sm" onClick={() => add(type)}>
@@ -218,7 +233,14 @@ export function TelegramMessageComposer({
           )}
         </div>
 
-        <TelegramPreview blocks={blocks} fallbackLabel={fallbackLabel} hint={hint} buttons={buttons} localUrls={localUrls} />
+        <TelegramPreview
+          blocks={blocks}
+          fallbackLabel={fallbackLabel}
+          hint={hint}
+          buttons={buttons}
+          buttonsLabel={buttonsLabel}
+          localUrls={localUrls}
+        />
       </div>
     </section>
   );
@@ -301,12 +323,93 @@ function BlockCard({
             />
             {textEmpty ? <p className="mt-1 text-xs text-danger">{ar.promptTextRequired}</p> : null}
           </>
+        ) : block.type === "audio" ? (
+          <AudioBody block={block} uploading={uploading} localUrl={localUrl} onUpload={onUpload} />
         ) : (
           <MediaBody block={block} uploading={uploading} localUrl={localUrl} onUpload={onUpload} />
         )}
         {error ? <p className="mt-2 text-xs text-danger">{error}</p> : null}
       </div>
     </Reorder.Item>
+  );
+}
+
+function AudioBody({
+  block,
+  uploading,
+  localUrl,
+  onUpload,
+}: {
+  block: Extract<TelegramPromptBlock, { type: "audio" }>;
+  uploading: boolean;
+  localUrl?: string;
+  onUpload: (file: File | null) => void;
+}) {
+  const [recording, setRecording] = useState(false);
+  const [micError, setMicError] = useState("");
+  const recorder = useRef<MediaRecorder | null>(null);
+  const chunks = useRef<Blob[]>([]);
+
+  useEffect(() => {
+    return () => {
+      recorder.current?.stream.getTracks().forEach((track) => track.stop());
+    };
+  }, []);
+
+  async function toggle() {
+    if (recording) {
+      recorder.current?.stop();
+      setRecording(false);
+      return;
+    }
+    setMicError("");
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const mime = ["audio/ogg;codecs=opus", "audio/webm;codecs=opus", "audio/webm", "audio/mp4"].find((type) =>
+        MediaRecorder.isTypeSupported(type),
+      );
+      const rec = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
+      chunks.current = [];
+      rec.ondataavailable = (event) => {
+        if (event.data.size) chunks.current.push(event.data);
+      };
+      rec.onstop = () => {
+        stream.getTracks().forEach((track) => track.stop());
+        const raw = rec.mimeType || mime || "audio/webm";
+        const type = raw.split(";")[0] || "audio/webm";
+        const ext = type.includes("ogg") ? "ogg" : type.includes("mp4") ? "m4a" : type.includes("mpeg") ? "mp3" : "webm";
+        onUpload(new File(chunks.current, `voice.${ext}`, { type }));
+      };
+      rec.start();
+      recorder.current = rec;
+      setRecording(true);
+    } catch {
+      setMicError(ar.micDenied);
+    }
+  }
+
+  const src = localUrl || (block.storageId ? `/api/files/${block.storageId}` : "");
+  const recordButton = (
+    <Button type="button" variant={recording ? "danger" : "primary"} size="sm" loading={uploading} onClick={() => void toggle()}>
+      <Mic className="size-3.5" />
+      {recording ? ar.promptStopRecording : block.storageId || localUrl ? ar.promptReplace : ar.promptRecordAudio}
+    </Button>
+  );
+
+  return (
+    <div className="space-y-2">
+      {recording ? <p className="text-xs font-medium text-danger">{ar.promptRecording}</p> : null}
+      {src ? <audio controls src={src} className="h-9 w-full" /> : null}
+      {!src && !recording ? (
+        <div className="flex flex-col items-center gap-2.5 rounded-xl border border-dashed border-warning/50 bg-warning-soft/40 px-3 py-6 text-center">
+          <p className="text-xs text-muted-foreground">{ar.promptMissingFile}</p>
+          {recordButton}
+        </div>
+      ) : (
+        <div className="flex justify-end">{recordButton}</div>
+      )}
+      {micError ? <p className="text-xs text-danger">{micError}</p> : null}
+    </div>
   );
 }
 
@@ -424,12 +527,14 @@ function TelegramPreview({
   fallbackLabel,
   hint,
   buttons,
+  buttonsLabel,
   localUrls,
 }: {
   blocks: TelegramPromptBlock[];
   fallbackLabel: string;
   hint?: string;
   buttons?: string[];
+  buttonsLabel?: string;
   localUrls: Record<string, string>;
 }) {
   const usable = blocks.filter((b) => (b.type === "text" ? b.text.trim() : b.storageId || localUrls[b.id]));
@@ -439,7 +544,7 @@ function TelegramPreview({
   const shown = withPromptHint(base, hint);
 
   return (
-    <div className="self-start rounded-2xl border border-border bg-[#e6ebee] p-3 lg:sticky lg:top-2">
+    <div className="self-start rounded-2xl border border-border bg-[#e6ebee] p-3">
       <div className="mb-2.5 flex items-center gap-1.5 text-xs font-semibold text-[#4a5a66]">
         <Eye className="size-3.5" aria-hidden />
         {ar.preview}
@@ -454,6 +559,14 @@ function TelegramPreview({
               <p className="whitespace-pre-wrap px-3 py-2">{b.text}</p>
             ) : b.type === "image" ? (
               <AuthImage fileId={b.storageId || null} localUrl={localUrls[b.id]} className="max-h-40 w-56 object-cover" />
+            ) : b.type === "audio" ? (
+              <div className="w-56 px-3 py-2">
+                <audio
+                  controls
+                  src={localUrls[b.id] || (b.storageId ? `/api/files/${b.storageId}` : undefined)}
+                  className="h-9 w-full"
+                />
+              </div>
             ) : (
               <div className="flex items-center gap-2 px-3 py-2" dir="ltr">
                 <FileText className="size-8 shrink-0 text-primary" />
@@ -467,6 +580,7 @@ function TelegramPreview({
         ))}
         {buttons?.length ? (
           <div className="grid w-full gap-1">
+            {buttonsLabel ? <p className="px-1 pt-1 text-[11px] text-muted-foreground">{buttonsLabel}</p> : null}
             {buttons.map((label, i) => (
               <div
                 key={`${label}-${i}`}

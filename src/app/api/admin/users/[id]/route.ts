@@ -12,7 +12,7 @@ export async function PATCH(req: Request, ctx: Ctx) {
     const body = z
       .object({
         status: z.enum(["ACTIVE", "DISABLED", "BLOCKED"]).optional(),
-        password: z.string().min(10).optional(),
+        password: z.string().min(10, "كلمة المرور يجب أن تكون 10 أحرف على الأقل").optional(),
       })
       .parse(await req.json());
     if (body.status) await UserService.updateStatus(id, body.status, actor.id);

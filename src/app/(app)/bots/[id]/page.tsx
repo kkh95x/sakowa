@@ -22,7 +22,7 @@ import { Badge } from "@/components/ui/badge";
 import { Card, CardHeader } from "@/components/ui/card";
 import { useToast } from "@/components/ui/toast";
 import { TelegramMessageComposer } from "@/components/telegram/telegram-message-composer";
-import { defaultWelcomeText } from "@/lib/telegram/welcome-prompt";
+import { WELCOME_GREETING } from "@/lib/telegram/welcome-prompt";
 import { cn } from "@/lib/utils";
 import type { FieldType, RequestField, TelegramPromptBlock } from "@/types";
 import { nextFieldName } from "@/lib/requests/field-names";
@@ -90,6 +90,8 @@ export default function BotDetailPage() {
   const [fields, setFields] = useState<RequestField[]>([]);
   const [welcomeBlocks, setWelcomeBlocks] = useState<TelegramPromptBlock[]>([]);
   const [savingWelcome, setSavingWelcome] = useState(false);
+  const [welcomeSaved, setWelcomeSaved] = useState(false);
+  const [welcomeError, setWelcomeError] = useState<string | null>(null);
   /** Reloads triggered by unrelated actions must not discard an in-progress composition. */
   const welcomeLoaded = useRef(false);
 
@@ -147,21 +149,47 @@ export default function BotDetailPage() {
     load();
   }
 
+  function updateWelcome(blocks: TelegramPromptBlock[]) {
+    setWelcomeBlocks(blocks);
+    setWelcomeSaved(false);
+    setWelcomeError(null);
+  }
+
   async function saveWelcome() {
-    setSavingWelcome(true);
-    const res = await fetch(`/api/bots/${id}`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ welcomePrompt: welcomeBlocks.length ? { blocks: welcomeBlocks } : null }),
-    });
-    setSavingWelcome(false);
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) {
-      toast(typeof data.error === "string" ? `${ar.saveFailed}: ${data.error}` : ar.saveFailed, "error");
+    const pending = welcomeBlocks.some((block) => block.type !== "text" && !block.storageId);
+    if (pending) {
+      setWelcomeError(ar.welcomeSaveWait);
+      setWelcomeSaved(false);
+      toast(ar.welcomeSaveWait, "error");
       return;
     }
-    setWelcomeBlocks(data.bot?.welcomePrompt?.blocks ?? []);
-    toast(ar.welcomeMessageSaved);
+    setSavingWelcome(true);
+    setWelcomeError(null);
+    try {
+      const res = await fetch(`/api/bots/${id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ welcomePrompt: welcomeBlocks.length ? { blocks: welcomeBlocks } : null }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        const message = typeof data.error === "string" ? data.error : ar.saveFailed;
+        setWelcomeError(message);
+        setWelcomeSaved(false);
+        toast(message, "error");
+        return;
+      }
+      const saved = data.bot?.welcomePrompt?.blocks;
+      if (Array.isArray(saved)) setWelcomeBlocks(saved);
+      setWelcomeSaved(true);
+      toast(ar.welcomeMessageSaved, "success");
+    } catch {
+      setWelcomeError(ar.saveFailed);
+      setWelcomeSaved(false);
+      toast(ar.saveFailed, "error");
+    } finally {
+      setSavingWelcome(false);
+    }
   }
 
   async function deleteBot() {
@@ -385,26 +413,28 @@ export default function BotDetailPage() {
           actions={
             <div className="flex flex-wrap gap-2">
               {welcomeBlocks.length ? (
-                <Button type="button" variant="outline" size="sm" onClick={() => setWelcomeBlocks([])}>
+                <Button type="button" variant="outline" size="sm" onClick={() => updateWelcome([])}>
                   {ar.welcomeMessageReset}
                 </Button>
               ) : null}
               <Button type="button" size="sm" loading={savingWelcome} onClick={saveWelcome}>
-                {savingWelcome ? ar.loading : ar.save}
+                {savingWelcome ? ar.loading : welcomeSaved ? ar.welcomeSaved : ar.save}
               </Button>
             </div>
           }
         />
+        {welcomeError ? <p className="mt-3 text-sm text-danger">{welcomeError}</p> : null}
         <div className="mt-4">
           <TelegramMessageComposer
             ownerId={id}
             blocks={welcomeBlocks}
-            onChange={setWelcomeBlocks}
-            fallbackLabel={defaultWelcomeText(activeTypeNames.length > 0)}
+            onChange={updateWelcome}
+            fallbackLabel={WELCOME_GREETING}
             title={ar.welcomeMessage}
             subtitle={ar.welcomeMessageSubtitle}
             emptyHint={ar.welcomeMessageEmpty}
             buttons={[...activeTypeNames, "📋 شكاواي", "ℹ️ المساعدة"]}
+            buttonsLabel={ar.welcomeThenComplaints}
           />
         </div>
       </Card>

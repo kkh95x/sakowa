@@ -42,6 +42,7 @@ import {
 } from "@/lib/telegram/order-command";
 import { logJson } from "@/lib/log";
 import { fieldAnswerHint } from "@/lib/telegram/field-prompt";
+import { enqueueVoiceTranscript } from "@/lib/speech/transcribe-voice";
 import { correlationId } from "@/lib/security/crypto";
 import type { ConversationState, RequestField, TelegramPrompt } from "@/types";
 
@@ -291,9 +292,16 @@ async function attachUploadToDraft(params: {
     const snapshot = current.formSnapshot as { fields?: RequestField[] } | null | undefined;
     if (snapshot?.fields && !snapshot.fields.some((f) => f.id === params.field.id)) return stale("field_not_in_draft");
     const nextDraft = { ...((current.draft as Record<string, unknown>) ?? {}) };
-    const existingId = params.existingFileId(draftValue(nextDraft, params.field));
+    const existing = draftValue(nextDraft, params.field);
+    const existingId = params.existingFileId(existing);
     if (existingId && existingId !== params.telegramFileId) return stale("answer_replaced");
-    writeDraft(nextDraft, params.field, params.value);
+    const previousTranscript =
+      existing && typeof existing === "object" ? (existing as { transcript?: unknown }).transcript : undefined;
+    const value =
+      previousTranscript && params.value && typeof params.value === "object"
+        ? { ...(params.value as Record<string, unknown>), transcript: previousTranscript }
+        : params.value;
+    writeDraft(nextDraft, params.field, value);
     const attachments = [...new Set([...((current.attachments as string[]) ?? []), params.gridFsId])];
     // updatedAt acts as a version so a concurrent answer in the same draft is not overwritten.
     const result = await db
@@ -1144,17 +1152,26 @@ export class TelegramConversationService {
     if (field.type === "DYNAMIC") {
       const input = normalizeTelegramMessage(msg);
       if (!input || input.contentType === "unknown") {
-        await TelegramService.sendMessage(
-          botId,
-          chatId,
-          "يرجى إرسال نص أو صورة أو صوت أو فيديو أو ملف أو موقع أو جهة اتصال.",
-        );
+        await TelegramService.sendMessage(botId, chatId, fieldAnswerHint("DYNAMIC") ?? "يمكنك الاجابة بمقطع صوتي او نص");
         return;
       }
       const answer = toDynamicAnswer(input);
+      if (input.contentType === "voice" || input.contentType === "audio") {
+        answer.transcript = { status: "pending", text: null };
+      }
       writeDraft(draft, field, answer);
       const next = nextAskIndex(fields, rules, applyBranchingDraft(fields, rules, draft), index);
       await patch(botId, from.id, { draft, attachments, draftId, ...positionFields(fields, next) });
+      if ((input.contentType === "voice" || input.contentType === "audio") && input.telegramFileId) {
+        enqueueVoiceTranscript({
+          botId,
+          telegramUserId: from.id,
+          draftId,
+          fieldId: field.id,
+          fieldName: field.name,
+          fileId: input.telegramFileId,
+        });
+      }
       if (input.telegramFileId && input.kind) {
         void persistTelegramUpload({
           botId,

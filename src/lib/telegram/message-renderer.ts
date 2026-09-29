@@ -3,7 +3,8 @@ import type { TelegramPromptBlock } from "@/types";
 export type TelegramSendStep =
   | { kind: "text"; blockId: string; text: string }
   | { kind: "photo"; blockId: string; storageId: string; fileName: string }
-  | { kind: "document"; blockId: string; storageId: string; fileName: string };
+  | { kind: "document"; blockId: string; storageId: string; fileName: string }
+  | { kind: "audio"; blockId: string; storageId: string; fileName: string };
 
 export type PromptLogLevel = "info" | "warn" | "error";
 
@@ -12,6 +13,7 @@ export interface TelegramPromptSender {
   sendText(text: string, extra?: Record<string, unknown>): Promise<unknown>;
   sendPhoto(storageId: string, fileName: string, extra?: Record<string, unknown>): Promise<unknown>;
   sendDocument(storageId: string, fileName: string, extra?: Record<string, unknown>): Promise<unknown>;
+  sendAudio(storageId: string, fileName: string, extra?: Record<string, unknown>): Promise<unknown>;
   log?(level: PromptLogLevel, event: string, data: Record<string, unknown>): void;
 }
 
@@ -39,6 +41,7 @@ const FAILURE_EVENT: Record<TelegramSendStep["kind"], string> = {
   text: "TEXT_SEND_FAILED",
   photo: "IMAGE_SEND_FAILED",
   document: "DOCUMENT_SEND_FAILED",
+  audio: "AUDIO_SEND_FAILED",
 };
 
 export class TelegramMessageRenderer {
@@ -53,6 +56,8 @@ export class TelegramMessageRenderer {
         steps.push({ kind: "photo", blockId: block.id, storageId: block.storageId, fileName: block.fileName || "image.jpg" });
       } else if (block.type === "document" && block.storageId) {
         steps.push({ kind: "document", blockId: block.id, storageId: block.storageId, fileName: block.fileName || "file.bin" });
+      } else if (block.type === "audio" && block.storageId) {
+        steps.push({ kind: "audio", blockId: block.id, storageId: block.storageId, fileName: block.fileName || "voice.webm" });
       }
     }
     return steps;
@@ -81,6 +86,8 @@ export class TelegramMessageRenderer {
           await sender.sendText(step.text, extra);
         } else if (step.kind === "photo") {
           await sendImageWithFallback(step, sender, extra, log, result);
+        } else if (step.kind === "audio") {
+          await sendAudioWithFallback(step, sender, extra, log, result);
         } else {
           await sender.sendDocument(step.storageId, step.fileName, extra);
         }
@@ -133,6 +140,29 @@ async function sendImageWithFallback(
     log("warn", "IMAGE_FALLBACK_DOCUMENT_SUCCESS", { blockId: step.blockId });
   } catch (docErr) {
     log("error", "IMAGE_FALLBACK_DOCUMENT_FAILED", { blockId: step.blockId, error: errorText(docErr) });
+    throw docErr;
+  }
+}
+
+async function sendAudioWithFallback(
+  step: Extract<TelegramSendStep, { kind: "audio" }>,
+  sender: TelegramPromptSender,
+  extra: Record<string, unknown> | undefined,
+  log: (level: PromptLogLevel, event: string, data: Record<string, unknown>) => void,
+  result: TelegramRenderResult,
+) {
+  try {
+    await sender.sendAudio(step.storageId, step.fileName, extra);
+    return;
+  } catch (audioErr) {
+    log("warn", "AUDIO_SEND_FAILED", { blockId: step.blockId, error: errorText(audioErr) });
+  }
+  try {
+    await sender.sendDocument(step.storageId, step.fileName, extra);
+    result.degraded.push(step.blockId);
+    log("warn", "AUDIO_FALLBACK_DOCUMENT_SUCCESS", { blockId: step.blockId });
+  } catch (docErr) {
+    log("error", "AUDIO_FALLBACK_DOCUMENT_FAILED", { blockId: step.blockId, error: errorText(docErr) });
     throw docErr;
   }
 }
