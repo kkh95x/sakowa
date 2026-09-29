@@ -65,7 +65,7 @@ function png(width: number, height: number, from: [number, number, number], to: 
 }
 
 function pdf(title: string) {
-  const content = `BT /F1 20 Tf 60 760 Td (${title}) Tj 0 -30 Td /F1 12 Tf (Shakowa - full feature test document) Tj ET`;
+  const content = `BT /F1 20 Tf 60 760 Td (${title}) Tj 0 -30 Td /F1 12 Tf (shakwaa - full feature test document) Tj ET`;
   const objects = [
     "<< /Type /Catalog /Pages 2 0 R >>",
     "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",

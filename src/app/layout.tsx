@@ -3,7 +3,7 @@ import "./globals.css";
 import { Providers } from "@/components/providers";
 
 export const metadata: Metadata = {
-  title: "Shakowa",
+  title: "shakwaa",
   description: "منصة إدارة الشكاوى عبر تيليجرام",
   icons: { icon: "/logo.jpg" },
 };

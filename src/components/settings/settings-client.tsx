@@ -255,7 +255,7 @@ export default function SettingsClient() {
                         const url = URL.createObjectURL(blob);
                         const a = document.createElement("a");
                         a.href = url;
-                        a.download = "shakowa-recovery-codes.txt";
+                        a.download = "shakwaa-recovery-codes.txt";
                         a.click();
                       }}
                     >

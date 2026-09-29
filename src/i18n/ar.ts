@@ -1,5 +1,5 @@
 export const ar = {
-  brand: "Shakowa",
+  brand: "shakwaa",
   tagline: "منصة إدارة الشكاوى عبر تيليجرام",
   login: "تسجيل الدخول",
   logout: "تسجيل الخروج",

@@ -5,7 +5,7 @@ import { Secret, TOTP } from "otpauth";
 import QRCode from "qrcode";
 import { audit } from "@/lib/audit/audit";
 
-const issuer = process.env.TOTP_ISSUER ?? "Shakowa";
+const issuer = process.env.TOTP_ISSUER ?? "shakwaa";
 
 function totp(secretBase32: string) {
   return new TOTP({
