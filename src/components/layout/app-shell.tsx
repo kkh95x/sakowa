@@ -13,7 +13,6 @@ import {
   LogOut,
   Logs,
   Menu,
-  MessageSquareWarning,
   Settings,
   ShieldBan,
   Users,
@@ -237,9 +236,9 @@ function AppShellInner({
   const sidebar = (
     <aside className="flex h-full w-64 flex-col border-e border-border bg-sidebar text-sidebar-foreground">
       <div className="flex h-16 shrink-0 items-center gap-2.5 px-4">
-        <div className="flex size-9 items-center justify-center rounded-xl bg-primary text-primary-foreground shadow-card">
-          <MessageSquareWarning className="size-[18px]" />
-        </div>
+        <span className="flex size-9 shrink-0 items-center justify-center overflow-hidden rounded-xl shadow-card">
+          <img src="/logo.jpg" alt="" className="size-full scale-150 object-cover" />
+        </span>
         <div className="min-w-0">
           <div className="text-[15px] font-semibold leading-tight">{ar.brand}</div>
           <div className="truncate text-[11px] text-muted-foreground">{ar.tagline}</div>

@@ -8,6 +8,9 @@ export function middleware(req: NextRequest) {
   if (PUBLIC.some((p) => pathname === p || pathname.startsWith(`${p}/`))) {
     return NextResponse.next();
   }
+  if (pathname === "/logo.jpg" || pathname === "/icon" || pathname.startsWith("/icon.")) {
+    return NextResponse.next();
+  }
   if (pathname.startsWith("/api/")) {
     return NextResponse.next();
   }

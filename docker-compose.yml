@@ -24,7 +24,7 @@ services:
     image: mongo:7
     restart: unless-stopped
     volumes:
-      - bothub-mongo:/data/db
+      - shakowa-mongo:/data/db
     networks:
       - bothub-internal
 
@@ -33,4 +33,4 @@ networks:
     driver: bridge
 
 volumes:
-  bothub-mongo:
+  shakowa-mongo:
